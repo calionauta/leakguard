@@ -284,6 +284,8 @@ export const SECRET_PATTERNS: SecretPattern[] = [
   { name: "GitHub Fine-grained Token", pattern: /\bgithub_pat_[A-Za-z0-9_]{22,}\b/g, severity: "high" },
   { name: "GitHub User Token", pattern: /\bghu_[A-Za-z0-9]{36}\b/g, severity: "high" },
   { name: "GitHub Refresh Token", pattern: /\bghr_[A-Za-z0-9]{36}\b/g, severity: "high" },
+  { name: "GitHub OAuth Token", pattern: /\bgho_[A-Za-z0-9]{36,}\b/g, severity: "high" },
+  { name: "GitHub App Install Token", pattern: /\bghs_[A-Za-z0-9]{36,}\b/g, severity: "high" },
   { name: "GitLab Token", pattern: /\bglpat-[0-9A-Za-z\-_]{20,}\b/g, severity: "high" },
   { name: "Slack Token", pattern: /\bxox[bpears]-[A-Za-z0-9-]{10,}\b/gi, severity: "high" },
   { name: "Slack Webhook", pattern: /https:\/\/hooks\.slack\.com\/services\/[A-Za-z0-9_/]+/g, severity: "high" },

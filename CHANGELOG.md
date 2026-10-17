@@ -2,6 +2,14 @@
 
 All notable changes to `pi-leakguard` are documented here.
 
+## [0.6.1] - 2026-10-17
+
+### Fixed
+- **GitHub OAuth (`gho_`) and GitHub App installation (`ghs_`) tokens are now redacted.** They had no dedicated pattern in `SECRET_PATTERNS`, so a bare token — e.g. pasted inside a `curl` command — passed through the redactor untouched. They were only caught when they carried an explicit key prefix (`export TOKEN=...`), which is the less common way a token leaks into a transcript. The same gap applied to `scanForSecrets`, the last line of defence before a push. Both patterns use `{36,}` because GitHub App installation tokens vary in length. This matters because `gho_`/`ghs_` are the highest-privilege GitHub credentials and the ones automation and CI actually carry.
+
+### Changed
+- `package-lock.json` was stuck at `0.5.0` while `package.json` said `0.6.0`. Lock now matches the manifest.
+
 ## [0.6.0] - 2026-07-15
 
 ### Changed

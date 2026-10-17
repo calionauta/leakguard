@@ -300,6 +300,31 @@ test("redactSecretsInText redacts GitHub PAT", () => {
   assert.ok(!text.includes("ghp_"));
 });
 
+// GitHub token shapes that previously escaped the redactor (gho_/ghs_ had no
+// dedicated pattern, and the generic "Token Assignment" rule only fires when
+// the token carries an explicit key= prefix). Built at runtime so these
+// fixtures never contain a literal token.
+const ghToken = (prefix: string, len = 36) => prefix + "a".repeat(len);
+
+test("redacts raw gho_ (OAuth) token without a key prefix", () => {
+  const tok = ghToken("gh" + "o_");
+  const { text } = redact(`curl -H "Authorization: token ${tok}" https://api.github.com/user`);
+  assert.ok(!text.includes(tok), "raw gho_ token leaked");
+});
+
+test("redacts raw ghs_ (GitHub App install) token without a key prefix", () => {
+  const tok = ghToken("gh" + "s_");
+  const { text } = redact(`curl -H "Authorization: token ${tok}" https://api.github.com/user`);
+  assert.ok(!text.includes(tok), "raw ghs_ token leaked");
+});
+
+test("scanForSecrets flags gho_ and ghs_ (egress last line of defence)", () => {
+  for (const p of ["gh" + "o_", "gh" + "s_"]) {
+    const found = scanForSecrets(`git push https://x:${ghToken(p)}@github.com/a/b.git`);
+    assert.ok(found.length > 0, `${p} not flagged by scanForSecrets`);
+  }
+});
+
 test("redactSecretsInText redacts Vault token", () => {
   const { text } = redact("hvs.abcdefghijklmnopqrstuvwx");
   assert.ok(!text.includes("hvs."));
