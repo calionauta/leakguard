@@ -1,6 +1,6 @@
 {
   "name": "pi-leakguard",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "description": "Name reservation for the pi.dev host of leakguard. The extension itself installs from the repository root: pi install git:github.com/calionauta/leakguard",
   "keywords": [
     "pi",

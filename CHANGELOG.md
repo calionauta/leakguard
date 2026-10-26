@@ -1,6 +1,85 @@
 # Changelog
 
-All notable changes to `pi-leakguard` are documented here.
+All notable changes to `leakguard` are documented here.
+
+## [0.13.0] - 2026-10-26
+
+### Fixed — the OpenCode plugin had never loaded
+
+OpenCode 2.x replaced the V1 plugin shape with V2, and the loader **only warns**
+when a module exports the wrong one. `{ id, server }` was rejected with
+`Missing key at ["default"]["effect"], ["default"]["setup"]`, so on both machines
+the plugin had not run since the shape changed. No error reached the model, and
+every unit test passed, because the hooks do work when invoked directly — nothing
+ever invoked them. Found in `~/.local/share/opencode/log/opencode.log`.
+
+`setup` (V2) is now exported beside `server` (V1); extra keys are ignored by both
+majors, so one default serves either.
+
+### Fixed — the pi host looked for the engine in the wrong directory
+
+`engine.ts` hardcoded `~/.bin/betterleaks`; the Linux server uses `~/bin`. It
+appeared to work there only because a stale `~/.bin/` copy was present. `engine.ts`
+is now a thin binding over `core/engine-client.ts` (which always resolved both),
+so "one engine client, two hosts" is literal rather than aspirational. That also
+removed the second copy of `RULE_NAMES`, line/column pass-through and
+`detectAll` — which had already been added to `core/` and not to the pi side.
+
+### Fixed — eleven refusals said nothing actionable
+
+Eleven `block: true` branches built `Blocked by leakguard: ...` by hand, bypassing
+`blockMessage()` — including the path guards and egress, the ones that fire most.
+`llm-hints.ts` exists because a session burned 8 blocked calls rewriting the same
+file; those branches answered none of *what / where / what to do*. All now route
+through `blockMessage()`. The path guards also got their own remedy: telling the
+model to "rotate the credential" when nothing was read is wrong advice about a
+credential that was never exposed.
+
+### Fixed — OpenCode and pi disagreed about what a refusal says
+
+`core/path-guard.ts` and `core/egress.ts` kept the older two-sentence wording, so
+the *weaker* text was running in the host that had silently failed to load.
+Both now follow the same rule as `blockMessage()`. The generic fallback (a rule id
+from an engine update, a shape with no curated advice) no longer guesses the case.
+
+### Changed — install no longer fails headlessly
+
+`prepare` ran the engine installer on every git install, and opencode's embedded
+npm treats the interactive read as a failure. Renamed to an explicit
+`ensure-engine` script; the engine check belongs at first run, where a terminal
+exists and the model can be told the gate is degraded.
+
+The root `workspaces` field was the remaining blocker for
+`opencode plugin add github:...`: anomalyco/opencode#49704 fails the git-dependency
+prepare step on that field alone. Removed — it only matters for `npm install` at
+the repo root during development. `main`/`exports` now point at the OpenCode host;
+`pi` reads `pi.extensions` and is unaffected.
+
+### Added
+
+- `scripts/install-oc.sh` — copy, then **re-verify** the copy; a copy step alone
+  reproduces the drift bug, since a stale plugin that loads looks current. Also
+  removes the legacy single-file plugin and prints the log line that proves a load.
+- `scripts/check-installs.sh [--remote]` — five surfaces that each failed silently
+  at least once: pi checkout, OpenCode files, **OpenCode runtime module cache**,
+  git hook, engine. The runtime check is the one that catches "files correct,
+  process serving older code".
+- `npm run typecheck` now also checks `packages/oc-leakguard/index.ts` under
+  es2022/bundler, the resolution the OpenCode runtime uses. It was never in the
+  root tsconfig, which is how a deleted export passed every check and failed only
+  in the live log.
+
+### Removed
+
+- `plugins/` — pre-refactor duplicate of `packages/oc-leakguard` (306 lines, its
+  own `detectSecrets`/`redactOutput`). Nothing imported it, it was still listed in
+  `package.json` `files[]`, and its README told people to copy it.
+
+### Note
+
+If you upgraded from 0.12.0 and run OpenCode, **restart it**. The module cache is
+per process, so corrected files do not affect a running `opencode serve`, which
+continues to report `Plugin failed` until restarted.
 
 ## [0.12.0] - 2026-10-26
 

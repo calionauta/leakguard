@@ -12,10 +12,17 @@ the model be told when the gate refuses*.
 | host | package | install |
 |---|---|---|
 | [pi.dev](https://pi.dev) | `pi-leakguard` (repo root) | `pi install git:github.com/calionauta/leakguard` |
-| [OpenCode](https://opencode.ai) | `oc-leakguard` (`packages/oc-leakguard/`) | `opencode plugin add github:calionauta/leakguard` |
+| [OpenCode](https://opencode.ai) | `oc-leakguard` (`packages/oc-leakguard/`) | `opencode plugin add github:calionauta/leakguard` or `scripts/install-oc.sh` |
 
 **Neither needs an npm publish.** Both resolve a GitHub repo directly: `pi`
 installs from the repository root, OpenCode accepts a Git package specifier.
+
+Installing once is not the same as staying installed. Both hosts can be *correct on
+disk and broken in practice*, in ways that never surface as an error: `pi` does not
+pull its git checkout, and a long-running `opencode serve` keeps the module it
+loaded in memory and reports `Plugin failed` after the files change underneath it.
+`scripts/check-installs.sh` checks every surface, including whether the running
+process actually loaded the current code.
 
 Shared in `core/`: the engine client, the blocked-path rules, and the egress
 judgement. Per host, only the hook API and the wording of a refusal. That split is
@@ -51,10 +58,15 @@ pi install git:github.com/calionauta/leakguard
 ### 3. OpenCode
 
 ```sh
-opencode plugin add github:calionauta/leakguard
-# or, from a checkout:
-cp -r packages/oc-leakguard ~/.config/opencode/plugins/leakguard
+opencode plugin add github:calionauta/leakguard   # installs a pinned snapshot
+# or, from a checkout -- tracks the checkout and verifies what it wrote:
+scripts/install-oc.sh
 ```
+
+`install-oc.sh` is preferred when you work on this repo, because it re-checks the
+copied files and cleans up the legacy single-file plugin. Either way, **restart
+OpenCode afterwards**: the plugin is cached per process, so correcting the files
+does not affect a running `opencode serve`.
 
 ### 4. The commit gate (optional, recommended)
 
@@ -66,7 +78,10 @@ git config --global core.hooksPath ~/.git-hooks
 ### Verify, rather than assume
 
 ```sh
-python3 scripts/verify-engine.py
+python3 scripts/verify-engine.py     # engine rules intact, no local override
+scripts/check-installs.sh --remote   # every host surface, both machines
+npm test                             # 151 unit tests
+npm run typecheck                    # root extension AND the OpenCode host
 ```
 
 ## Security model & limitations

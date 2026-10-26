@@ -1,6 +1,6 @@
 {
   "name": "oc-leakguard",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "description": "Secret-exposure guard for OpenCode: blocks secret-file access and credential egress, redacts credentials from tool output. Detection delegated to betterleaks.",
   "type": "module",
   "main": "./index.ts",

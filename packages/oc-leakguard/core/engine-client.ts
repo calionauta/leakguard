@@ -318,10 +318,10 @@ export function engineStatus(): EngineStatus {
 export function engineStatusLine(): string {
   const st = engineStatus();
   if (!st.available) {
-    return `leakguard: betterleaks ${st.reason ?? "unavailable"} — credential detection is NOT running, only path guards and the egress rule. Tell the human to run: ~/.bin/betterleaks-update`;
+    return `leakguard: betterleaks ${st.reason ?? "unavailable"} — credential detection is NOT running, only path guards and the egress rule. Tell the human to run the updater (in ~/.bin on macOS, ~/bin on Linux).`;
   }
   if (st.drifted) {
-    return `leakguard: betterleaks drift (pinned ${st.pinnedVersion}, running ${st.version}) — rules are compiled into the binary, so detection differs from what was reviewed. Ask the human before updating: ~/.bin/betterleaks-update`;
+    return `leakguard: betterleaks drift (pinned ${st.pinnedVersion}, running ${st.version}) — rules are compiled into the binary, so detection differs from what was reviewed. Ask the human before updating (updater lives in ~/.bin on macOS, ~/bin on Linux).`;
   }
   return "";
 }
