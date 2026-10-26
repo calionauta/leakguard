@@ -2,6 +2,31 @@
 
 All notable changes to `pi-leakguard` are documented here.
 
+## [0.9.1] - 2026-10-26
+
+### Added
+
+- **OpenCode plugin** (plugins/opencode.ts). Same engine, same config, same
+  thin layer, different hook API: tool.execute.before for the path guard and the
+  egress check, tool.execute.after for redaction. 14 assertions cover it,
+  including the three that matter most: an SSH key read is blocked, an egress
+  command carrying a credential is blocked, and a credential with no egress is
+  NOT blocked (reading a token is not a leak).
+
+### Fixed
+
+- The git hook assumed betterleaks lives at ~/.bin/betterleaks. The Linux server
+  keeps it at ~/bin/betterleaks, so the hook failed closed there and would have
+  blocked every commit. It now probes both layouts, and the server gate passes
+  5/5 with the same hook file as macOS.
+
+### Notes
+
+- The server pi-leakguard was pinned at 0.6.1, from before the engine swap. It is
+  now on 0.9.0 with 140/140 tests passing and a clean typecheck on that machine.
+  Engine and config were installed there too; the only gap had been the config,
+  which meant the 46 lg-* rules never ran server-side.
+
 ## [0.9.0] - 2026-10-26
 
 Detection is now delegated to [betterleaks](https://github.com/betterleaks/betterleaks).
