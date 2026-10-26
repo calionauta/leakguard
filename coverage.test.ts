@@ -6,7 +6,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { SECRET_VALUE_RE, CONTENT_VALUE_RE, PEM_RE, redactSecretsInText, hasSecretMaterial } from "./security.js";
+import {
+  CONTENT_VALUE_RE,
+  PEM_RE,
+  commandHasSecret,
+  contentHasSecret,
+  hasSecretMaterial,
+  redactSecretsInText,
+} from "./security.js";
 
 const c = (...codes: number[]) => String.fromCharCode(...codes);
 const BODY = "aB3xK9mQ2pL7vN4tR8yZ1cW6hJ5fD0sG2eU9";
@@ -31,11 +38,13 @@ const CASES: Array<[string, string]> = [
 ];
 
 test("real credentials are still detected (no false negatives introduced)", () => {
+  // Detection moved to betterleaks (engine.ts). SECRET_VALUE_RE is now a narrow
+  // residual matcher for the two shapes the engine does not report, so asserting
+  // it directly would test the wrong thing. Ask the same question the command
+  // and content layers ask.
   for (const [label, val] of CASES) {
-    const shared = SECRET_VALUE_RE.test(val) || PEM_RE.test(val);
-    const content = CONTENT_VALUE_RE.test(val) || PEM_RE.test(val);
-    assert.ok(shared, "command layer must catch " + label);
-    assert.ok(content, "content layer must catch " + label);
+    assert.ok(commandHasSecret(val), "command layer must catch " + label);
+    assert.ok(contentHasSecret(val), "content layer must catch " + label);
   }
 });
 

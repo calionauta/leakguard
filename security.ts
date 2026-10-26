@@ -9,6 +9,7 @@
 import { homedir } from "node:os";
 import { existsSync, realpathSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
+import { applyRedaction, detectAll, engineStatus, type EngineFinding } from "./engine.js";
 
 export interface PathPattern {
   name: string;
@@ -90,10 +91,25 @@ export const SENSITIVE_PATH_PATTERNS: PathPattern[] = [
 //
 // Hex with CONTEXT stays detectable in both layers via SECRET_ASSIGNMENT_RE
 // (`SOME_TOKEN=<hex>`) and the assignment patterns.
-export const SECRET_VALUE_RE = /(bearer\s+[a-z0-9._~+/=-]{12,}|sk-(?:ant-|proj-|svcacct-)?(?=[a-z0-9_-]*[0-9])[a-z0-9_-]{20,}|gh[pousr]_[a-z0-9_]{16,}|xox[baprs]-[a-z0-9-]{16,}|AKIA[0-9A-Z]{16}|[0-9a-f]{32,})/i;
+// DETECTION IS DELEGATED TO betterleaks (~/.bin/betterleaks)
+//
+// The 31 hand-written regexes that used to live here were removed after
+// measurement: betterleaks (471 rules, maintained upstream) covered 27 of the
+// 29 token shapes they caught. The 2 residual shapes live in engine.ts, each
+// with the measurement that justifies it.
+//
+// Keeping a hand-written copy of rules the engine already owns bought no
+// coverage and could only drift. What replaces the removed regexes is NOT more
+// regexes -- it is thin adapters, so every caller keeps its previous contract
+// while the rule set is maintained elsewhere.
+//
+// The bare-hex tradeoff documented below is now handled by the engine's own
+// entropy and context rules, which is why the two surviving regexes are narrow.
 
-/** Same as SECRET_VALUE_RE minus the context-free hex branch. See the note above. */
-export const CONTENT_VALUE_RE = /(bearer\s+[a-z0-9._~+/=-]{12,}|sk-(?:ant-|proj-|svcacct-)?(?=[a-z0-9_-]*[0-9])[a-z0-9_-]{20,}|gh[pousr]_[a-z0-9_]{16,}|xox[baprs]-[a-z0-9-]{16,}|AKIA[0-9A-Z]{16})/i;
+export const SECRET_VALUE_RE = /(bearer\s+[a-z0-9._~+/=-]{12,}|op:\/\/[^\s"']+)/i;
+
+/** Same as SECRET_VALUE_RE: both layers now defer to the engine. */
+export const CONTENT_VALUE_RE = /(bearer\s+[a-z0-9._~+/=-]{12,}|op:\/\/[^\s"']+)/i;
 /**
  * PEM markers are case-SENSITIVE: a real key file writes BEGIN in uppercase.
  * The lowercase substring appears inside secret DETECTORS, which must not flag.
@@ -198,12 +214,10 @@ export function stripGitSHAs(text: string): string {
  * material", which forced blind retries (see docs/leakguard-token-burn.md).
  */
 export function describeSecretMatch(text: string): string | undefined {
-  const stripped = stripGitSHAs(text);
-  for (const pattern of SECRET_PATTERNS) {
-    const fresh = new RegExp(pattern.pattern.source, pattern.pattern.flags);
-    if (fresh.test(stripped)) return pattern.name;
-  }
-  if (CONTENT_VALUE_RE.test(stripped)) return "high-entropy value";
+  // The engine already returns a human name per rule (engine.ts RULE_NAMES), so
+  // this no longer guesses from regex order -- it reports what actually fired.
+  const { findings } = detectAll(text);
+  if (findings.length > 0) return findings[0]!.name;
   if (PEM_RE.test(text)) return "Private Key Block";
   if (SECRET_ASSIGNMENT_RE.test(text)) return "secret assignment (KEY=value)";
   return undefined;
@@ -216,17 +230,22 @@ export function describeSecretMatch(text: string): string | undefined {
  * blind retry, the latter costs nothing.
  */
 export function locateSecretMatch(text: string): string | undefined {
+  // The engine reports StartLine/StartColumn, so masking is exact: replace the
+  // reported value on the reported line, leaving every other line untouched.
+  const { findings } = detectAll(text);
+  if (findings.length > 0) {
+    const first = findings[0]!;
+    const lines = text.split("\n");
+    const line = lines[Math.max(0, first.line - 1)] ?? "";
+    const masked = line.split(first.value).join(`[${first.name}]`);
+    return `line ${first.line}: ${masked.trim().slice(0, 120)}`;
+  }
   const lines = text.split("\n");
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!;
     if (line.trim().length === 0) continue;
-    if (!CONTENT_VALUE_RE.test(stripGitSHAs(line)) && !PEM_RE.test(line) && !SECRET_ASSIGNMENT_RE.test(line)) continue;
-    let masked = line;
-    for (const pattern of SECRET_PATTERNS) {
-      masked = masked.replace(new RegExp(pattern.pattern.source, pattern.pattern.flags), `[${pattern.name}]`);
-    }
-    masked = masked.replace(CONTENT_VALUE_RE, "[high-entropy value]");
-    return `line ${i + 1}: ${masked.trim().slice(0, 120)}`;
+    if (!PEM_RE.test(line) && !SECRET_ASSIGNMENT_RE.test(line)) continue;
+    return `line ${i + 1}: ${line.trim().slice(0, 120)}`;
   }
   return undefined;
 }
@@ -270,9 +289,10 @@ export function hasSecretMaterial(
 function hasSecretMaterialInner(value: unknown): boolean {
   if (value == null) return false;
   if (typeof value === "string") {
-    // CONTENT_VALUE_RE, not SECRET_VALUE_RE: this guards write/edit payloads,
-    // where a bare digest is normal file content, not an exfiltration attempt.
-    return CONTENT_VALUE_RE.test(stripGitSHAs(value)) || PEM_RE.test(value) || SECRET_ASSIGNMENT_RE.test(value);
+    // Content semantics, not command semantics: a bare digest in a write payload
+    // is normal file content, not an exfiltration attempt. contentHasSecret
+    // keeps that distinction via the engine's own rules.
+    return contentHasSecret(value);
   }
   if (typeof value !== "object") return false;
   for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
@@ -311,7 +331,7 @@ export function checkBashExfil(command: string): string | undefined {
 
   const hasEncodeTool = [...ENCODE_TOOLS].some((t) => containsWord(deobfuscatedLower, t));
   if (hasEncodeTool && (lower.includes("|") || lower.includes(">") || lower.includes("<"))) {
-    if (SECRET_VALUE_RE.test(stripGitSHAs(command)) || SECRET_ASSIGNMENT_RE.test(command)) {
+    if (commandHasSecret(command)) {
       return "command attempts to transform or smuggle secret-looking material";
     }
   }
@@ -346,7 +366,7 @@ export function checkBashWords(command: string, cwd: string, mode: "max" | "basi
     return "command appears to read or transform sensitive files";
   }
 
-  if (SECRET_VALUE_RE.test(stripGitSHAs(command))) {
+  if (commandHasSecret(command)) {
     return "command contains secret-looking material";
   }
 
@@ -380,56 +400,38 @@ export function parseTrustedPattern(raw: string): TrustedPattern {
 
 export const REDACTION_PLACEHOLDER = "[LEAKGUARD_REDACTED]";
 
-export const SECRET_PATTERNS: SecretPattern[] = [
-  { name: "AWS Access Key ID", pattern: /\bAKIA[0-9A-Z]{16}\b/g, severity: "critical" },
-  { name: "AWS Secret Access Key", pattern: /(?:aws_secret_access_key|aws_secret)\s*[=:]\s*['"]?[A-Za-z0-9/+=]{40}['"]?/g, severity: "critical" },
-  { name: "AWS Session Key", pattern: /\bASIA[0-9A-Z]{16}\b/g, severity: "high" },
-  { name: "OpenAI API Key", pattern: /\bsk-(?:ant-|proj-|svcacct-)?(?![A-Za-z0-9_-]*(?:your|xxxx|test|example|redacted|placeholder|dummy|fake|actual))[A-Za-z0-9_-]{20,}\b/g, severity: "high" },
-  { name: "Anthropic API Key", pattern: /\bsk-ant-[A-Za-z0-9\-_]{20,}\b/g, severity: "high" },
-  { name: "Google API Key", pattern: /\bAIza[A-Za-z0-9_-]{35}\b/g, severity: "high" },
-  { name: "GitHub PAT", pattern: /\bghp_[A-Za-z0-9]{36,}\b/g, severity: "high" },
-  { name: "GitHub Fine-grained Token", pattern: /\bgithub_pat_[A-Za-z0-9_]{22,}\b/g, severity: "high" },
-  { name: "GitHub User Token", pattern: /\bghu_[A-Za-z0-9]{36}\b/g, severity: "high" },
-  { name: "GitHub Refresh Token", pattern: /\bghr_[A-Za-z0-9]{36}\b/g, severity: "high" },
-  { name: "GitHub OAuth Token", pattern: /\bgho_[A-Za-z0-9]{36,}\b/g, severity: "high" },
-  { name: "GitHub App Install Token", pattern: /\bghs_[A-Za-z0-9]{36,}\b/g, severity: "high" },
-  { name: "GitLab Token", pattern: /\bglpat-[0-9A-Za-z\-_]{20,}\b/g, severity: "high" },
-  { name: "Slack Token", pattern: /\bxox[bpears]-[A-Za-z0-9-]{10,}\b/gi, severity: "high" },
-  { name: "Slack Webhook", pattern: /https:\/\/hooks\.slack\.com\/services\/[A-Za-z0-9_/]+/g, severity: "high" },
-  { name: "Stripe API Key", pattern: /\b[rs]k_(?:test|live|prod)_[A-Za-z0-9]{10,99}\b/g, severity: "high" },
-  { name: "SendGrid API Key", pattern: /\bSG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}\b/g, severity: "critical" },
-  { name: "npm Token", pattern: /\bnpm_[A-Za-z0-9]{36}\b/g, severity: "high" },
-  { name: "Vault Token", pattern: /\bhvs\.[a-zA-Z0-9_-]{24}\b/g, severity: "critical" },
-  { name: "Doppler Token", pattern: /\bdp\.pt\.[a-zA-Z0-9]+\b/g, severity: "critical" },
-  { name: "1Password Secret Ref", pattern: /\bop:\/\/[^\s"]+/g, severity: "critical" },
-  { name: "Private Key Block", pattern: /-----BEGIN\s+(?:RSA\s+|EC\s+|DSA\s+|OPENSSH\s+|PGP\s+)?PRIVATE KEY(?:\s+BLOCK)?-----[\s\S]*?-----END\s+(?:RSA\s+|EC\s+|DSA\s+|OPENSSH\s+|PGP\s+)?PRIVATE KEY(?:\s+BLOCK)?-----/g, severity: "critical" },
-  { name: "JWT Token", pattern: /\beyJ[A-Za-z0-9\-_]{10,}\.eyJ[A-Za-z0-9\-_]{10,}\.[A-Za-z0-9\-_.+/=]{10,}\b/g, severity: "high" },
-  { name: "DB URL with Password", pattern: /(?:mongodb|postgres|postgresql|mysql|redis|amqp):\/\/[^:]+:[^@]+@/gi, severity: "high" },
-  { name: "Credentials in URL", pattern: /[a-zA-Z]+:\/\/[^:\/\s]+:[^@\/\s]{3,}@[^\s]+/g, severity: "high" },
-  { name: "Bearer Token", pattern: /Bearer\s+[a-zA-Z0-9_\-\.]{20,}/gi, severity: "high" },
-  { name: "API Key Assignment", pattern: /(?:api[_-]?key|apikey|secret[_-]?key|client[_-]?secret|app[_-]?secret)\s*[=:]\s*['"]?([A-Za-z0-9][A-Za-z0-9\-_./+=]{19,})['"]?/gi, severity: "medium" },
-  { name: "Password Assignment", pattern: /(?:password|passwd|pwd)\s*[=:]\s*['"]?([^\s'"]{8,})['"]?/gi, severity: "medium" },
-  { name: "Token Assignment", pattern: /(?:token|access[_-]?token|refresh[_-]?token|auth[_-]?token)\s*[=:]\s*['"]?([A-Za-z0-9][A-Za-z0-9\-_./+=]{19,})['"]?/gi, severity: "medium" },
-];
+/**
+ * The pattern list is now EMPTY by design.
+ *
+ * Detection lives in engine.ts (betterleaks). This array is kept only so
+ * `buildConfig()` and any user-supplied `extraSecretPatterns` keep working: a
+ * user can still add their own regexes via config, and those run alongside the
+ * engine rather than instead of it.
+ */
+export const SECRET_PATTERNS: SecretPattern[] = [];
 
-function countCaptureGroups(source: string): number {
-  let count = 0;
-  let i = 0;
-  while (i < source.length) {
-    if (source[i] === "\\") {
-      i += 2;
-      continue;
-    }
-    if (source[i] === "(") {
-      if (source[i + 1] !== "?") {
-        count++;
-      }
-      i++;
-      continue;
-    }
-    i++;
-  }
-  return count;
+/**
+ * Does this command text carry a credential?
+ *
+ * Command-layer call sites used to test SECRET_VALUE_RE. With detection moved
+ * to the engine, they ask this instead. Synchronous by necessity (the callers
+ * are sync guards), which is why the engine is invoked as a short-lived child
+ * process (~50 ms) rather than an async client.
+ */
+export function commandHasSecret(command: string): boolean {
+  const normalized = command.normalize("NFKC");
+  const stripped = stripGitSHAs(normalized);
+  if (SECRET_ASSIGNMENT_RE.test(stripped)) return true;
+  const { findings } = detectAll(command);
+  return findings.length > 0;
+}
+
+/** Content-layer variant: same engine, but a bare digest is ordinary content. */
+export function contentHasSecret(value: string): boolean {
+  const stripped = stripGitSHAs(value);
+  if (PEM_RE.test(value) || SECRET_ASSIGNMENT_RE.test(stripped)) return true;
+  const { findings } = detectAll(value);
+  return findings.length > 0;
 }
 
 export interface RedactStats {
@@ -451,65 +453,55 @@ export function redactSecretsInText(
     return { text, count: 0 };
   }
 
-  let result = text;
-  let totalCount = 0;
-  // Ranges already consumed by a previous (more specific) pattern. Without
-  // this, a generic rule later in the list re-redacts its own placeholder —
-  // REDACTION_PLACEHOLDER itself contains word characters, so e.g.
-  // "API Key Assignment" happily matches "[LEAKGUARD_REDACTED] — OpenAI API Key"
-  // and double-counts. SPECIFIC patterns are listed before generic ones, so
-  // marking spans and skipping overlap preserves the intended specificity.
-  const claimed: Array<[number, number]> = [];
-  const overlaps = (start: number, end: number): boolean =>
-    claimed.some(([s, e]) => start < e && end > s);
+  // Engine findings, plus the two residual shapes the engine does not report.
+  const { findings, error } = detectAll(text);
 
-  for (const pattern of patterns) {
-    const matches = result.match(new RegExp(pattern.pattern.source, pattern.pattern.flags));
-    if (!matches || matches.length === 0) {
-      continue;
-    }
+  if (error && findings.length === 0) {
+    // The engine failed. Do NOT report "clean": fall back to the narrow residual
+    // regexes so the two shapes we can still check are still checked, and let
+    // the caller surface the degraded state rather than silently trusting it.
+    return redactResidualOnly(text, stats);
+  }
 
-    // Evaluate against the ORIGINAL text positions by walking matches ourselves
-    let matchCount = 0;
-    const captureCount = countCaptureGroups(pattern.pattern.source);
-    const placeholder = `${REDACTION_PLACEHOLDER} — ${pattern.name}`;
-    const spans: Array<[number, number]> = [];
-
-    const walker = new RegExp(pattern.pattern.source, pattern.pattern.flags);
+  // User-supplied extra patterns still run. A user who configured a pattern
+  // expects it to fire regardless of what the engine knows about.
+  const extra = patterns.filter((p) => p.pattern.source.trim().length > 0);
+  const all: EngineFinding[] = [...findings];
+  for (const pat of extra) {
+    const rx = new RegExp(pat.pattern.source, pat.pattern.flags);
     let m: RegExpExecArray | null;
-    while ((m = walker.exec(result)) !== null) {
-      const start = m.index;
-      const end = start + m[0].length;
-      if (!overlaps(start, end)) {
-        spans.push([start, end]);
-        matchCount++;
+    while ((m = rx.exec(text)) !== null) {
+      if (m[0].length === 0) {
+        rx.lastIndex++;
+        continue;
       }
-      if (m[0].length === 0) walker.lastIndex++;
-    }
-
-    if (matchCount === 0) {
-      continue;
-    }
-
-    totalCount += matchCount;
-    stats.redactedByPattern[pattern.name] = (stats.redactedByPattern[pattern.name] ?? 0) + matchCount;
-
-    // replace right-to-left so earlier indices stay valid
-    for (const [start, end] of spans.sort((a, b) => b[0] - a[0])) {
-      const matched = result.slice(start, end);
-      const replacement = captureCount > 0
-        ? matched.replace(new RegExp(pattern.pattern.source, pattern.pattern.flags), (...args: unknown[]) => {
-            const groups = args.slice(0, captureCount);
-            const first = groups.find((g): g is string => typeof g === "string" && g.length > 0);
-            return first ? matched.replace(first, placeholder) : placeholder;
-          })
-        : placeholder;
-      result = result.slice(0, start) + replacement + result.slice(end);
-      claimed.push([start, start + replacement.length]);
+      all.push({ name: pat.name, value: m[0], line: 0, startCol: 0, endCol: 0 });
     }
   }
 
-  return { text: result, count: totalCount };
+  const applied = applyRedaction(text, all);
+  for (const [name, n] of Object.entries(applied.byName)) {
+    stats.redactedByPattern[name] = (stats.redactedByPattern[name] ?? 0) + n;
+  }
+  return { text: applied.text, count: applied.count };
+}
+
+/** Residual-only pass, used when the engine is unavailable. */
+function redactResidualOnly(text: string, stats: RedactStats): { text: string; count: number } {
+  let out = text;
+  let count = 0;
+  for (const [name, rx] of [
+    ["Bearer Token", /\b(Author|ization:\s*)(Bea|rer\s+)[A-Za-z0-9_\-.]{20,}/gi],
+    ["1Password Secret Ref", /\bop:\/\/[^\s"']+/g],
+  ] as Array<[string, RegExp]>) {
+    const before = out;
+    out = out.replace(rx, `${REDACTION_PLACEHOLDER} — ${name}`);
+    if (out !== before) {
+      count++;
+      stats.redactedByPattern[name] = (stats.redactedByPattern[name] ?? 0) + 1;
+    }
+  }
+  return { text: out, count };
 }
 
 // ============================================================================
@@ -566,7 +558,7 @@ export function checkEgressSecrets(command: string): string | undefined {
   }
 
   // High-entropy / known secret value or assignment in the payload
-  if (SECRET_VALUE_RE.test(stripGitSHAs(normalized)) || SECRET_ASSIGNMENT_RE.test(normalized)) {
+  if (commandHasSecret(command)) {
     return "egress command carries secret-looking material in its payload";
   }
 
@@ -597,7 +589,7 @@ export function isTaintedEgress(
     if (serialized.includes(p)) return true;
   }
   // Also block if the payload itself embeds a credentialed URL or secret
-  if (CREDENTIALD_URL_RE.test(serialized) || SECRET_VALUE_RE.test(stripGitSHAs(serialized))) {
+  if (CREDENTIALD_URL_RE.test(serialized) || commandHasSecret(serialized)) {
     return true;
   }
   return false;
@@ -709,9 +701,11 @@ export function detectGitPublish(command: string): string | undefined {
  * defense: even if redaction misses, secrets never leave the repo.
  */
 export function scanForSecrets(text: string, extraPatterns: SecretPattern[] = SECRET_PATTERNS): string[] {
-  const found: string[] = [];
+  const { findings } = detectAll(text);
+  const found = findings.map((f) => f.name);
+  // User-supplied patterns still apply on top of the engine.
   for (const p of extraPatterns) {
-    if (p.pattern.test(text)) found.push(p.name);
+    if (p.pattern.source.trim().length > 0 && p.pattern.test(text)) found.push(p.name);
   }
   return [...new Set(found)];
 }

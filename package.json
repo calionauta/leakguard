@@ -5,7 +5,7 @@
   "main": "index.ts",
   "type": "module",
   "scripts": {
-    "test": "tsx --test security.test.ts context.test.ts llm-hints.test.ts coverage.test.ts shape.test.ts",
+    "test": "tsx --test security.test.ts context.test.ts llm-hints.test.ts coverage.test.ts shape.test.ts engine.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "keywords": [

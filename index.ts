@@ -80,6 +80,7 @@ import {
   type BlockContext,
 } from "./llm-hints.js";
 import { describeSecretShape, describeNote } from "./shape.js";
+import { engineStatus } from "./engine.js";
 
 // ============================================================================
 // Types
@@ -801,6 +802,28 @@ export default function leakguardPersonal(pi: ExtensionAPI): void {
     state.cwdFallback = ctx.cwd;
     updateStatus(ctx);
     notify(ctx, `🛡️ ${EXTENSION_NAME} loaded (mode: ${state.mode})`, "info");
+
+    // Detection is delegated to betterleaks. Report its state at startup rather
+    // than failing later: an absent or drifted scanner is the one condition a
+    // user must not discover mid-session.
+    const engine = engineStatus();
+    if (!engine.available) {
+      notify(
+        ctx,
+        `🛡️ ${EXTENSION_NAME}: detection engine unavailable (${engine.reason}).\n` +
+          `Path guards and judgement layers still apply; credential detection is DEGRADED.\n` +
+          `Install with: ~/.bin/betterleaks-update`,
+        "warning"
+      );
+    } else if (engine.drifted) {
+      notify(
+        ctx,
+        `🛡️ ${EXTENSION_NAME}: betterleaks version drift (pinned ${engine.pinnedVersion}, ` +
+          `running ${engine.version}). Rules are compiled into the binary, so this IS a rule ` +
+          `change. Re-pin with: ~/.bin/betterleaks-update`,
+        "warning"
+      );
+    }
   });
 
   pi.on("session_shutdown", async () => {

@@ -229,28 +229,28 @@ test("checkBashWords does not false-positive on git object hashes", () => {
 });
 
 test("checkBashWords still blocks real secrets in max mode", () => {
+  // Built at runtime. The pre-engine regex required a digit somewhere in
+  // the body, and betterleaks requires 20+ chars after the prefix, so the
+  // fixture satisfies both and the assertion means what it claims.
   assert.ok(
-    checkBashWords("echo sk-abcdefghijklmnopqrstuvwxyz012345", CWD, "max"),
-    "sk- key must still be flagged"
+    checkBashWords("echo " + SK_PREFIX + "a".repeat(20) + "0123456789", CWD, "max"),
+    "sk- shaped key must still be flagged"
   );
   assert.ok(
-    checkBashWords("echo AKIAIOSFODNN7EXAMPLE", CWD, "max"),
-    "AKIA key must still be flagged"
-  );
-});
-
-test("checkBashWords still blocks sha256 high-entropy material", () => {
-  // 64-hex (sha256) is never a valid git SHA and must remain detected
-  assert.ok(
-    checkBashWords(
-      "echo e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-      CWD,
-      "max"
-    ),
-    "standalone sha256 blob must still be flagged"
+    checkBashWords("echo " + AWS_PREFIX + "IOSFODNN7EXAMPLE", CWD, "max"),
+    "AWS key must still be flagged"
   );
 });
 
+test("checkBashWords blocks high-entropy material", () => {
+  // A real credential, not a digest. betterleaks deliberately reports no
+  // rule for a bare 64-char hex digest (see the bare-digest test below),
+  // and a digest is not a credential, so it is the wrong fixture here.
+  assert.ok(
+    checkBashWords("echo " + GHP_PREFIX + "aB3xK9mQ2pL7vN4tR8yZ1cW6hJ5fD0sG2eU9", CWD, "max"),
+    "a credential in a command must still be blocked"
+  );
+});
 test("checkBashWords does not block critical utility in basic mode (only path checks)", () => {
   // In basic mode, path checks are skipped but critical-utility scan still applies generally.
   // The original blocks critical utilities regardless of mode. We keep it blocked for safety.
@@ -293,13 +293,24 @@ test("redactSecretsInText redacts AWS key", () => {
 });
 
 test("redactSecretsInText redacts OpenAI key", () => {
-  const { text } = redact("sk-proj-abcdefghijklmnopqrstuvwxyz");
-  assert.ok(!text.includes("sk-proj-"));
+  // Built at runtime. The original fixture was an all-letter body, which
+  // the OLD regex also rejected (it required a digit), so the assertion was
+  // vacuous. This one satisfies both engines and actually tests redaction.
+  const { text } = redact("k=" + SK_PREFIX + "proj-" + "a".repeat(20) + "0123456789");
+  assert.ok(!text.includes("a".repeat(20) + "0123456789"));
+  assert.match(text, /REDACTED/);
 });
 
 test("redactSecretsInText redacts GitHub PAT", () => {
-  const { text } = redact("ghp_1234567890abcdefghijklmnopqrstuvwxyz");
-  assert.ok(!text.includes("ghp_"));
+  // Runtime-built, high-entropy body. The original fixture was
+  // 1234567890abcdefghijklmnopqrstuvwxyz, which betterleaks deliberately
+  // does NOT report: its github-pat rule carries a stopwords filter for
+  // sequential/placeholder bodies. That rejection is correct, and it is one
+  // of the false-positive classes the hand-written regex lacked.
+  const tok = GHP_PREFIX + "aB3xK9mQ2pL7vN4tR8yZ1cW6hJ5fD0sG2eU9";
+  const { text } = redact(tok);
+  assert.ok(!text.includes(tok), "the PAT value must be gone");
+  assert.match(text, /REDACTED/);
 });
 
 // GitHub token shapes that previously escaped the redactor (gho_/ghs_ had no
@@ -307,6 +318,11 @@ test("redactSecretsInText redacts GitHub PAT", () => {
 // the token carries an explicit key= prefix). Built at runtime so these
 // fixtures never contain a literal token.
 const ghToken = (prefix: string, len = 36) => prefix + "a".repeat(len);
+/** Token prefixes assembled from char codes so no literal prefix hostile
+ *  to scanners sits in this file. */
+const SK_PREFIX = String.fromCharCode(115, 107, 45);
+const GHP_PREFIX = String.fromCharCode(103, 104, 112, 95);
+const AWS_PREFIX = String.fromCharCode(65, 75, 73, 65);
 
 test("redacts raw gho_ (OAuth) token without a key prefix", () => {
   const tok = ghToken("gh" + "o_");
@@ -338,9 +354,15 @@ test("redactSecretsInText redacts 1Password ref", () => {
 });
 
 test("redactSecretsInText redacts private key block", () => {
-  const block = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----";
-  const { text } = redact(block);
-  assert.ok(!text.includes("PRIVATE KEY"));
+  const B = "-----BEGIN " + "RSA PRIVATE KEY-----";
+  const E = "-----END " + "RSA PRIVATE KEY-----";
+  const { text, count } = redact(B + String.fromCharCode(10) + "MIIEowIBAAKCAQEA" + String.fromCharCode(10) + E);
+  assert.ok(count >= 1, "the key header must be redacted");
+  assert.ok(!text.includes(B), "the BEGIN header must be gone");
+  // The engine reports the HEADER as the secret (31 chars), not the whole
+  // block, so the END marker legitimately survives. Asserting otherwise was
+  // an artefact of the old whole-block regex.
+  assert.match(text, /REDACTED/);
 });
 
 test("redactSecretsInText redacts DB URL with password", () => {
@@ -361,8 +383,10 @@ test("redactSecretsInText leaves safe text untouched", () => {
 });
 
 test("redactSecretsInText counts multiple redactions", () => {
-  const { count } = redact("AKIAIOSFODNN7EXAMPLE and ghp_1234567890abcdefghijklmnopqrstuvwxyz");
-  assert.ok(count >= 2);
+  const aws = AWS_PREFIX + "IOSFODNN7EXAMPLE";
+  const gh = GHP_PREFIX + "aB3xK9mQ2pL7vN4tR8yZ1cW6hJ5fD0sG2eU9";
+  const { count } = redact("a=" + aws + " b=" + gh);
+  assert.ok(count >= 2, "both credentials must be redacted, got " + count);
 });
 
 // ============================================================================
@@ -448,7 +472,9 @@ test("checkPathSensitivityExtended: allow overrides block", () => {
 test("buildConfig merges extra secret patterns", () => {
   const cfg = buildConfig({ extraSecretPatterns: [{ name: "MyToken", pattern: "mytoken_[0-9]+" }] });
   assert.ok(cfg.secretPatterns.some((p) => p.name === "MyToken"));
-  assert.ok(cfg.secretPatterns.some((p) => p.name === "AWS Access Key ID"));
+  // The built-in list is EMPTY on purpose: detection moved to betterleaks
+  // (engine.ts). Asserting a built-in AWS rule would assert the old design.
+  assert.equal(cfg.secretPatterns.filter((p) => p.name === "AWS Access Key ID").length, 0);
 });
 
 test("buildConfig compiles allow/block regexes", () => {
@@ -529,12 +555,9 @@ test("trustedTest skips redaction entirely", () => {
 
 test("trustedTest does not affect non-trusted text", () => {
   const trustedTest = (s: string) => s.includes("pbinstall");
-  const { text, count } = redactOpts(
-    "API key: sk-proj-abcdefghijklmnopqrstuvwxyz",
-    { trustedTest }
-  );
-  assert.equal(count, 1);
-  assert.ok(!text.includes("sk-proj-"));
+  const secret = SK_PREFIX + "proj-" + "a".repeat(20) + "0123456789";
+  const { count } = redactOpts("API key: " + secret, { trustedTest });
+  assert.equal(count, 1, "a non-trusted secret must still be redacted");
 });
 
 // ============================================================================
@@ -578,15 +601,18 @@ test("stripGitSHAs removes git/short SHAs but keeps sha256", () => {
   assert.ok(stripGitSHAs(`echo ${SHA256}`).includes(SHA256), "sha256 must be preserved");
 });
 
-test("hasSecretMaterial ignores git SHA in write/grep payload", () => {
-  assert.equal(hasSecretMaterial(`git show ${GIT_SHA}`), false, "git SHA string must not flag");
+test("hasSecretMaterial ignores git SHA and flags credentials", () => {
+  // git SHAs must stay silent (they did before too, via stripGitSHAs).
+  assert.equal(hasSecretMaterial(`git show ${GIT_SHA}`), false, "git SHA must not flag");
   assert.equal(
     hasSecretMaterial({ content: `git show ${GIT_SHA}` }),
     false,
-    "git SHA nested in object must not flag"
+    "nested git SHA must not flag"
   );
-  assert.ok(hasSecretMaterial(`token=${SHA256}`), "sha256 payload must still flag");
-  assert.ok(hasSecretMaterial("sk-abcdefghijklmnopqrstuvwxyz012345"), "sk- must still flag");
+  // Real credentials must still flag. A bare digest no longer does: see the
+  // COVERAGE CHANGE note above (betterleaks has no bare-hex rule).
+  assert.ok(hasSecretMaterial("key=" + GHP_PREFIX + "aB3xK9mQ2pL7vN4tR8yZ1cW6hJ5fD0sG2eU9"),
+    "GitHub PAT must still flag");
 });
 
 test("checkBashExfil transform-smuggle does not false-positive on git SHA", () => {
@@ -595,25 +621,24 @@ test("checkBashExfil transform-smuggle does not false-positive on git SHA", () =
     undefined,
     "encode tool + git SHA must not be flagged as smuggle"
   );
+  // Transform + a REAL credential must still be blocked.
   assert.ok(
-    checkBashExfil(`base64 ${SHA256} | cat`),
-    "encode tool + sha256 blob must still be flagged"
+    checkBashExfil("base64 " + GHP_PREFIX + "aB3xK9mQ2pL7vN4tR8yZ1cW6hJ5fD0sG2eU9" + " | cat"),
+    "encode tool + credential must still be flagged"
   );
 });
-
-test("checkEgressSecrets allows git SHA in URL but blocks sha256", () => {
+test("checkEgressSecrets allows git SHA in URL but blocks a credential", () => {
   assert.equal(
     checkEgressSecrets(`curl https://example.com/${GIT_SHA}`),
     undefined,
-    "egress with git SHA in path must not flag"
+    "a git SHA in a URL is ordinary"
   );
   assert.ok(
-    checkEgressSecrets(`curl https://example.com/${SHA256}`),
-    "egress with sha256 blob must still flag"
+    checkEgressSecrets("curl https://example.com/" + GHP_PREFIX + "aB3xK9mQ2pL7vN4tR8yZ1cW6hJ5fD0sG2eU9"),
+    "a credential in an egress URL must still be flagged"
   );
 });
-
-test("isTaintedEgress ignores git SHA payload but flags sha256", () => {
+test("isTaintedEgress ignores git SHA payload but flags a credential", () => {
   const tainted = new Set(["/home/user/.env"]);
   assert.equal(
     isTaintedEgress("bash", `git show ${GIT_SHA}`, tainted),
@@ -621,14 +646,23 @@ test("isTaintedEgress ignores git SHA payload but flags sha256", () => {
     "git SHA payload with unrelated taint set must not flag"
   );
   assert.ok(
-    isTaintedEgress("bash", `echo ${SHA256}`, tainted),
-    "sha256 blob payload must still flag"
+    isTaintedEgress("bash", "echo " + GHP_PREFIX + "aB3xK9mQ2pL7vN4tR8yZ1cW6hJ5fD0sG2eU9", tainted),
+    "credential payload must still flag"
   );
 });
-
-// ============================================================================
-// False-positive regression tests (measured on 18 real repositories)
-// ============================================================================
+test("a bare hex digest is not treated as a credential", () => {
+  // DELIBERATE COVERAGE CHANGE. The pre-engine regex flagged any 32+ char hex
+  // run as "high-entropy value". That single branch produced the majority of
+  // false positives across 18 repos: npm integrity fields, manifest hashes,
+  // image digests, provenance files. A digest is not a secret, so betterleaks
+  // reports nothing for it and neither do we.
+  //
+  // If this ever needs to come back, it must come back WITH CONTEXT (an
+  // egress or transform command), not as a bare pattern -- see the exfil tests
+  // above, which now use a real credential instead.
+  const sha = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+  assert.equal(hasSecretMaterial(`echo ${sha}`), false, "bare digest must not flag");
+});
 
 test("supply-chain metadata is not treated as secret material", () => {
   // These shapes accounted for the bulk of false positives across 18 repos:
