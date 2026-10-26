@@ -53,6 +53,7 @@ export {
   type EngineStatus,
   type ScanResult,
   ruleName,
+  updaterHint,
   detectWithEngine,
   detectAll,
   redactText,

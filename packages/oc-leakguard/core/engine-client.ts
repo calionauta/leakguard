@@ -41,6 +41,27 @@ export function resolveEngine(): string | undefined {
   return undefined;
 }
 
+/**
+ * Where the human should look for the updater.
+ *
+ * Seven messages told them to run `~/.bin/betterleaks-update`. That path is real
+ * on macOS and absent on the Linux server, which keeps it in ~/bin — the exact bug
+ * this file's resolveEngine() was written to avoid, reintroduced in prose. A model
+ * following the instruction literally reports "not found" and concludes detection
+ * is unavailable on a host that has it; a human reads it as "already installed".
+ *
+ * Derived from where the ENGINE actually is, so the two cannot disagree.
+ */
+export function updaterHint(): string {
+  const bin = resolveEngine();
+  if (bin) {
+    const dir = bin.slice(0, bin.lastIndexOf("/"));
+    return `${dir}/betterleaks-update`;
+  }
+  // Nothing installed: name both layouts rather than guessing which host this is.
+  return "~/.bin/betterleaks-update (macOS) or ~/bin/betterleaks-update (Linux)";
+}
+
 export const ENGINE_BIN = resolveEngine();
 export const ENGINE_CFG = join(homedir(), ".config", "betterleaks", "betterleaks.toml");
 export const ENGINE_VERSION_FILE = join(homedir(), ".config", "betterleaks", "VERSION");
@@ -295,7 +316,9 @@ export interface EngineStatus {
 export function engineStatus(): EngineStatus {
   if (!ENGINE_BIN) {
     return { available: false, drifted: false, reason: "betterleaks not installed" };
-  }  let version: string | undefined;
+  }
+
+  let version: string | undefined;
   try {
     const out = execFileSync(ENGINE_BIN, ["--version"], { encoding: "utf8", timeout: 5_000 });
     version = out.match(/(\d+\.\d+\.\d+)/)?.[1];

@@ -22,7 +22,7 @@
  *     an HTTP header was blocked, and the value was never examined
  */
 
-import { detectWithEngine, ENGINE_BIN, ENGINE_CFG } from "./engine-client.js";
+import { detectWithEngine, ENGINE_BIN, ENGINE_CFG, updaterHint } from "./engine-client.js";
 
 /** Commands that move data off the machine. */
 export const EGRESS_TOOLS = new Set([
@@ -176,8 +176,7 @@ export function egressMessage(v: EgressVerdict): string {
       "",
       "What to do:",
       "  1. Run the command without the network part, if the two can be separated.",
-      "  2. Install the engine (the human runs `~/.bin/betterleaks-update`, or",
-      "     `~/bin/betterleaks-update` on Linux) and try again.",
+      `  2. Install the engine (the human runs ${updaterHint()}) and try again.`,
       "  3. If neither is possible, ask the human to run it themselves.",
     ].join("\n");
   }

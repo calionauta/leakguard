@@ -80,7 +80,7 @@ import {
   type BlockContext,
 } from "./llm-hints.js";
 import { describeSecretShape, describeNote } from "./shape.js";
-import { engineStatus } from "./engine.js";
+import { engineStatus, updaterHint } from "./engine.js";
 
 // ============================================================================
 // Types
@@ -812,7 +812,7 @@ export default function leakguardPersonal(pi: ExtensionAPI): void {
         ctx,
         `🛡️ ${EXTENSION_NAME}: detection engine unavailable (${engine.reason}).\n` +
           `Path guards and judgement layers still apply; credential detection is DEGRADED.\n` +
-          `Install with: ~/.bin/betterleaks-update`,
+          `Install with: ${updaterHint()}`,
         "warning"
       );
     } else if (engine.drifted) {
@@ -820,7 +820,7 @@ export default function leakguardPersonal(pi: ExtensionAPI): void {
         ctx,
         `🛡️ ${EXTENSION_NAME}: betterleaks version drift (pinned ${engine.pinnedVersion}, ` +
           `running ${engine.version}). Rules are compiled into the binary, so this IS a rule ` +
-          `change. Re-pin with: ~/.bin/betterleaks-update`,
+          `change. Re-pin with: ${updaterHint()}`,
         "warning"
       );
     }
@@ -841,7 +841,7 @@ export default function leakguardPersonal(pi: ExtensionAPI): void {
             `leakguard: the betterleaks detection engine is unavailable (${e.reason}). ` +
             `Credential detection is NOT running -- only path guards and the shell/egress ` +
             `judgement layers are. Do not claim this session is protected from secret ` +
-            `exposure. Tell the human to run: ~/.bin/betterleaks-update`,
+            `exposure. Tell the human to run: ${updaterHint()}`,
           display: false,
         },
       };
@@ -853,7 +853,7 @@ export default function leakguardPersonal(pi: ExtensionAPI): void {
           content:
             `leakguard: betterleaks drift -- pinned ${e.pinnedVersion}, running ${e.version}. ` +
             `Rules are compiled into the binary, so detection differs from what was reviewed. ` +
-            `Ask the human before updating: ~/.bin/betterleaks-update`,
+            `Ask the human before updating: ${updaterHint()}`,
           display: false,
         },
       };

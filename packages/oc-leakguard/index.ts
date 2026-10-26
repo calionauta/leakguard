@@ -42,6 +42,7 @@ import {
   resolveEngine,
   scanAndRedact,
   ENGINE_BIN,
+  updaterHint,
 } from "./core/engine-client.js";
 import { blockedPathReason, pathGuardMessage, PATH_TOOLS } from "./core/path-guard.js";
 import { checkEgress, egressMessage } from "./core/egress.js";
@@ -66,7 +67,7 @@ function offerInstall(status: string): void {
   offered = true;
   const interactive = Boolean(process.stdin.isTTY && process.stderr.isTTY) && !process.env.CI;
   if (!interactive) return;
-  console.warn("leakguard: install the engine with ~/.bin/betterleaks-update");
+  console.warn(`leakguard: install the engine with ${updaterHint()}`);
 }
 
 export function detectSecrets(text: string) {
