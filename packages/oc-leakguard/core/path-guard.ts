@@ -92,3 +92,6 @@ export function pathGuardMessage(tool: string, reason: string, target: string): 
     "resolves the real path, so the outcome will be identical.",
   ].join("\n");
 }
+
+/** Tools whose arguments name a file the agent intends to read or write. */
+export const PATH_TOOLS = new Set(["read", "write", "edit", "patch", "view"]);

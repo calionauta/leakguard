@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "test": "tsx --test security.test.ts context.test.ts llm-hints.test.ts coverage.test.ts shape.test.ts engine.test.ts",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit --skipLibCheck --target es2022 --moduleResolution bundler --module esnext packages/oc-leakguard/index.ts",
     "ensure-engine": "sh scripts/ensure-engine.sh"
   },
   "keywords": [
