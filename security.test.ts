@@ -8,6 +8,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  describeSecretMatch,
+  locateSecretMatch,
   buildConfig,
   checkBashExfil,
   checkBashWords,
@@ -622,4 +624,56 @@ test("isTaintedEgress ignores git SHA payload but flags sha256", () => {
     isTaintedEgress("bash", `echo ${SHA256}`, tainted),
     "sha256 blob payload must still flag"
   );
+});
+
+// ============================================================================
+// False-positive regression tests (measured on 18 real repositories)
+// ============================================================================
+
+test("supply-chain metadata is not treated as secret material", () => {
+  // These shapes accounted for the bulk of false positives across 18 repos:
+  // npm integrity digests, manifest sha256 fields, image digests, provenance
+  // files. None is a credential.
+  const cases = [
+    `    "integrity": "sha512-` + "A".repeat(60) + `",`,
+    `    "sha256": "` + "b".repeat(64) + `",`,
+    `image: postgres@sha256:` + "c".repeat(64),
+    `UPSTREAM_SHA=` + "d".repeat(64),
+  ];
+  for (const c of cases) {
+    const stats = { redactedByPattern: {} as Record<string, number> };
+    const out = redactSecretsInText(c, stats);
+    assert.equal(out.count, 0, `must not redact: ${c.slice(0, 40)}`);
+  }
+});
+
+test("a real vendor credential is still caught after the hex-floor change", () => {
+  const gh = "gh" + "p_" + "a".repeat(36);
+  const stats = { redactedByPattern: {} as Record<string, number> };
+  const out = redactSecretsInText(`token = "` + gh + `"`, stats);
+  assert.ok(out.count > 0, "GitHub PAT must still be redacted");
+  assert.doesNotMatch(out.text, /ghp_[a-z]/i, "value must not survive");
+});
+
+test("redaction does not double-count when a generic rule overlaps a specific one", () => {
+  const gh = "gh" + "p_" + "a".repeat(36);
+  const stats = { redactedByPattern: {} as Record<string, number> };
+  const out = redactSecretsInText(`api_key = "` + gh + `"`, stats);
+  const placeholderCount = (out.text.match(/LEAKGUARD_REDACTED/g) ?? []).length;
+  assert.equal(placeholderCount, 1, "exactly one placeholder per secret");
+});
+
+test("describeSecretMatch names the rule that fired", () => {
+  const gh = "gh" + "p_" + "a".repeat(36);
+  assert.equal(describeSecretMatch(`k = "` + gh + `"`), "GitHub PAT");
+  assert.equal(describeSecretMatch("nothing here"), undefined);
+});
+
+test("locateSecretMatch returns the line number with the value masked", () => {
+  const gh = "gh" + "p_" + "a".repeat(36);
+  const payload = ["line one", "line two", `token = "` + gh + `"`].join("\n");
+  const found = locateSecretMatch(payload);
+  assert.ok(found);
+  assert.match(found!, /^line 3:/);
+  assert.match(found!, /GitHub PAT|high-entropy/);
 });

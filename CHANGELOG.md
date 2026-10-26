@@ -2,6 +2,29 @@
 
 All notable changes to `pi-leakguard` are documented here.
 
+## [0.7.0] - 2026-10-26
+
+### Added
+- **`llm-hints.ts` — every block now tells the model what matched, where, and what to do instead.** A block used to say only "secret-looking material", which named neither the pattern nor the location. In a real session that cost three full rewrites of one file: the model tried a literal, then a variable, then character codes, because each denial was indistinguishable and gave it nothing to act on. Blocks now carry the pattern name (`"GitHub PAT"`), the masked offending line (`line 12: token = "[GitHub PAT]"`), a remedy chosen per pattern family, and an explicit note that retrying with different syntax will not help. Remedies are pattern-specific: a private key is referenced by path, a password is read by key name, a test fixture is built at runtime.
+- **Repeat-block detection.** `state.blockAttempts` counts blocks per tool+intent within a turn. From the second attempt the message changes: "Changing the command's syntax will NOT change the outcome — the check is about the value, not the spelling." The counter resets at `agent_end`, so a new turn is a new intent.
+- **Search-pattern false positive recognition.** `grep -n 'DOTENV|\\.env' file.ts` was blocked as a path access, after which the model read a 583-line file instead of grepping it — 5x the tokens. A sensitive token inside a quoted argument containing regex metacharacters is now recognised as a search pattern, and the block says so with a copy-pasteable workaround.
+- **Context-aware path allowlist.** `isDocumentationPath()` exempts `docs/`, `*.example.*`, `*.sample`, `*.template`, test fixtures, `testdata/`, and vendored upstream code. Those files exist to show what a credential looks like. Measured: of 50 content-layer hits across 18 real repos, nearly all were documentation. A real private key block is still caught even in docs.
+- `describeSecretMatch()` / `locateSecretMatch()`, plus `context.test.ts`, `llm-hints.test.ts` and `coverage.test.ts` (30 new assertions).
+
+### Fixed
+- **The pre-commit/push scan could not see `.env` files.** `index.ts` ran `git diff --cached -- . ':(exclude).env*'`, so `git add .env && git commit` produced no finding — the one thing a pre-commit scan most needs to catch. The exclusion is gone; staged env files are now detected by name and reported separately from secret-pattern hits.
+- **The redaction note was attached to output block 0.** When a redaction landed in a later text block, the model saw redacted text with no explanation and re-ran the tool to get "the real output". The note now attaches to the block that changed, names the rules that fired, and on a repeat says the value will not be revealed by re-running.
+- **Redaction double-counted overlapping rules.** A generic rule such as `API Key Assignment` matched the placeholder text emitted by a specific rule, inflating counts and nesting placeholders. Spans are now claimed by the first (most specific) pattern that matches.
+- **False positives on supply-chain metadata.** `SECRET_VALUE_RE` included `[0-9a-f]{32,}`, which matches git SHAs that `stripGitSHAs()` does not reach (a 40-hex SHA inside a longer hex run), npm `integrity` digests, `sha256:` image pins, and CI fixtures asserting a digest is not flagged. Split into two patterns with opposite tolerance: `SECRET_VALUE_RE` (commands, egress — hex stays, because an HMAC key being shipped off-box matters) and `CONTENT_VALUE_RE` (file contents and tool output — hex dropped, because reading files is high-volume and low-stakes). Hex with context (`SOME_TOKEN=<hex>`) is still caught via `SECRET_ASSIGNMENT_RE`.
+- **The `@SK` branch matched prose.** `sk-intent-need` (a task id) and `sk-without-ide` (a sentence) were flagged. Real keys are long base62 runs containing at least one digit; the branch now requires one, and placeholder words (`your`, `actual`, `example`, `xxxx`, `test`, `dummy`, `fake`, `placeholder`, `redacted`) are excluded.
+- **PEM markers matched lowercase.** The `i` flag made the lowercase spelling match, which is the exact substring picoclaw's own secret detector searches for — the guard fired on code whose job is finding keys. `PEM_RE` is now case-sensitive and separate; real key blocks are always uppercase.
+
+### Changed
+- `hasSecretMaterial(value, { path })` accepts the write/edit target so documentation and fixtures are not flagged. Called without `path` the behaviour is unchanged.
+
+### Measured
+Over 18 real repositories on the author's server, blocking-layer false positives on tracked source fell **95 files → 21 → 2 → 0** across these fixes. Coverage is verified unchanged by `coverage.test.ts`, which asserts every real credential shape is still detected (`ghp_`, `sk-`, `sk-proj-`, `sk-ant-`, `AKIA`, `xoxb-`, PEM, plus the tightened `sk-` branch). Suite: 75 → 105 assertions, all passing; `tsc --noEmit` clean.
+
 ## [0.6.1] - 2026-10-17
 
 ### Fixed

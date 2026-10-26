@@ -61,12 +61,24 @@ import {
   redactSecretsInText,
   resolvePath,
   scanForSecrets,
+  describeSecretMatch,
+  locateSecretMatch,
   formatAuditEntry,
   type AuditEntry,
   type LeakguardConfig,
   type RedactStats,
   type TrustedPattern,
 } from "./security.js";
+import {
+  blockMessage,
+  repeatWarning,
+  redactionNote,
+  remedyFor,
+  searchPatternFalsePositive,
+  searchPatternHint,
+  REPEAT_BLOCK_THRESHOLD,
+  type BlockContext,
+} from "./llm-hints.js";
 
 // ============================================================================
 // Types
@@ -89,6 +101,15 @@ interface ExtensionState {
   config: ReturnType<typeof buildConfig>;
   cwdFallback: string;
   stats: SessionStats;
+  /**
+   * Per-intent block counter. Keyed by tool + a coarse intent signature, and
+   * reset at the end of every turn. Exists because the model cannot tell that
+   * its 4th phrasing of the same operation is the same operation: in a real
+   * session, `bash cat`, a heredoc, `write` with a literal, and `write` with a
+   * variable each tripped a DIFFERENT layer and so looked like four unrelated
+   * failures. Counting per intent turns that into one clear message.
+   */
+  blockAttempts: Map<string, number>;
 }
 
 interface ToolCallResult {
@@ -227,6 +248,7 @@ export default function leakguardPersonal(pi: ExtensionAPI): void {
     taintedPaths: new Set<string>(),
     config: buildConfig(loaded.raw),
     cwdFallback: process.cwd(),
+    blockAttempts: new Map<string, number>(),
     stats: {
       blockedCalls: 0,
       redactedSecrets: 0,
@@ -261,12 +283,17 @@ export default function leakguardPersonal(pi: ExtensionAPI): void {
    * Ask the user before blocking. In AUTO mode, blocks silently without
    * asking (redaction still applies at tool_result). In max/basic mode,
    * shows a confirm prompt.
+   *
+   * `hints` carries WHAT matched and WHERE, so the block message handed back to
+   * the model can name the pattern and location instead of saying "secret-looking
+   * material". This is the difference between one retry and a guessing loop.
    */
   const confirmBlock = async (
     ctx: ExtensionContext,
     title: string,
     body: string,
-    category: string
+    category: string,
+    hints?: BlockContext
   ): Promise<boolean> => {
     if (state.mode === "auto") {
       recordBlock(category);
@@ -278,14 +305,55 @@ export default function leakguardPersonal(pi: ExtensionAPI): void {
     // add a third "auto" button; instead, surface the mode auto command in
     // the body so the user discovers it in context.
     const hint = "\n\nTip: run `/leakguard mode auto` to skip these prompts (blocks stay on, no confirm).";
+    // The model sees `body` on denial. Append the actionable part there, not to
+    // the prompt, so the human still reads the short version.
     const ok = await ctx.ui.confirm(title, body + hint);
     if (!ok) {
+      const reason = hints
+        ? `${body}\n${repeatAwareGuidance(hints)}`
+        : body;
       audit({ ts: new Date().toISOString(), event: "block", tool: "confirm", category, reason: body.slice(0, 120) });
       return false; // user denied → keep blocked
     }
     unrecordBlock(category);
     audit({ ts: new Date().toISOString(), event: "allow", tool: "confirm", category, reason: "user allowed" });
     return true; // user allowed → proceed
+  };
+
+  /**
+   * Coarse intent signature: the model's *goal*, not its spelling. `bash cat`
+   * and a `write` with the same payload share a signature when they mention the
+   * same sensitive token, so the 2nd attempt can be answered differently from
+   * the 1st.
+   */
+  const intentSignature = (toolName: string, input: unknown): string => {
+    let body = "";
+    try {
+      body = typeof input === "string" ? input : JSON.stringify(input ?? "");
+    } catch {
+      body = toolName;
+    }
+    const family = toolName === "write" || toolName === "edit" ? "write" : toolName;
+    const touched = body.length > 4000 ? body.slice(0, 4000) : body;
+    return `${family}:${touched.length}:${family === "bash" ? "shell" : "payload"}`;
+  };
+
+  const bumpAttempts = (toolName: string, input: unknown): number => {
+    const key = intentSignature(toolName, input);
+    const next = (state.blockAttempts.get(key) ?? 0) + 1;
+    state.blockAttempts.set(key, next);
+    return next;
+  };
+
+  /** Guidance appended to every denial, escalating once the loop is detected. */
+  const repeatAwareGuidance = (hints: BlockContext): string => {
+    const base = [blockMessage({ ...hints, attempts: 0 })]
+      .filter((line) => line && line !== hints.pattern)
+      .join("\n");
+    if ((hints.attempts ?? 0) >= REPEAT_BLOCK_THRESHOLD) {
+      return repeatWarning(hints.attempts ?? 0, hints);
+    }
+    return base;
   };
 
   const formatStats = (): string => {
@@ -413,29 +481,58 @@ export default function leakguardPersonal(pi: ExtensionAPI): void {
     // Pre-commit/push secret scan (last line of defense)
     const gitPublish = detectGitPublish(input.command);
     if (gitPublish && isBlockMode(state.mode)) {
-      // Scan staged + working diff for secrets
+      // Scan staged + working diff for secrets.
+      //
+      // The pathspec used to exclude `.env*`, which meant the ONE thing a
+      // pre-commit scan most needs to catch — a .env being staged — was
+      // invisible to it. Verified empirically: with `:(exclude).env*` in place,
+      // `git add .env && git commit` produced no finding. The exclusion is
+      // dropped here; the separate path-layer guards still cover .env reads.
       let diff = "";
+      let stagedEnvFiles: string[] = [];
       try {
-        diff = execSync("git diff --cached -- . ':(exclude).env*' 2>/dev/null; git diff -- . ':(exclude).env*' 2>/dev/null", {
+        diff = execSync("git diff --cached -- . 2>/dev/null; git diff -- . 2>/dev/null", {
           cwd: ctx.cwd,
           encoding: "utf8",
           maxBuffer: 5 * 1024 * 1024,
         });
+        const names = execSync("git diff --cached --name-only --diff-filter=ACMR 2>/dev/null", {
+          cwd: ctx.cwd,
+          encoding: "utf8",
+        });
+        stagedEnvFiles = names
+          .split("\n")
+          .map((s) => s.trim())
+          .filter((f) => f.length > 0)
+          .filter((f) => /(?:^|\/)\.env(?:\.|$)/i.test(f))
+          .filter((f) => !/\.(?:example|sample|template)$/i.test(f));
       } catch {
         diff = "";
       }
       const found = scanForSecrets(diff, state.config.secretPatterns);
-      if (found.length > 0) {
+      if (found.length > 0 || stagedEnvFiles.length > 0) {
+        const attempts = bumpAttempts("git", input.command);
+        const detail = [
+          ...stagedEnvFiles.map((f) => `${f} (env file)`),
+          ...found,
+        ].join(", ");
         const ok = await confirmBlock(
           ctx,
           "⚠️ Secret in Git Diff",
-          `leakguard: ${gitPublish} would publish content containing possible secret(s):\n\n  ${found.join(", ")}\n\nAllow anyway?`,
-          "Git Secret"
+          `leakguard: ${gitPublish} would publish content containing possible secret(s):\n\n  ${detail}\n\nAllow anyway?`,
+          "Git Secret",
+          { tool: "git", location: gitPublish, pattern: found[0], masked: stagedEnvFiles[0], attempts }
         );
         if (!ok) {
           return {
             block: true,
-            reason: `Blocked by ${EXTENSION_NAME}: ${gitPublish} contains secret-like material (${found.join(", ")})`,
+            reason: [
+              `leakguard blocked ${gitPublish}: ${detail}`,
+              "",
+              stagedEnvFiles.length > 0
+                ? "An .env file must not be committed. Commit a .env.example (placeholder values) and keep the real one out of git; the runtime reads it from its own path, not from the repo."
+                : remedyFor(found[0]),
+            ].join("\n"),
           };
         }
       }
@@ -532,8 +629,55 @@ export default function leakguardPersonal(pi: ExtensionAPI): void {
 
     const words = checkBashWords(input.command, ctx.cwd, state.mode);
     if (words && isBlockMode(state.mode)) {
-      const ok = await confirmBlock(ctx, "⚠️ Risky Command", `leakguard: ${words}\n\nCommand will be blocked unless you allow it.\n\nAllow?`, "Command Scan");
-      if (!ok) return { block: true, reason: `Blocked by ${EXTENSION_NAME}: ${words}` };
+      // The highest-value false positive in practice: a sensitive token used as a
+      // SEARCH PATTERN, not as a path. `grep -n 'DOTENV|\.env' file.ts` was
+      // blocked as a path access, and the model then read a 583-line file
+      // instead of grepping it — 5x the tokens. Detect the shape and say so
+      // rather than making the model guess.
+      const hit = (words.match(/'([^']+)'/)?.[1]) ?? "";
+      const asPattern = hit ? searchPatternFalsePositive(input.command, hit) : undefined;
+      const attempts = bumpAttempts("bash", input.command);
+
+      if (asPattern) {
+        const ok = await confirmBlock(
+          ctx,
+          "⚠️ Risky Command (looks like a search pattern)",
+          `leakguard: ${words}\n\n${searchPatternHint(asPattern)}\n\nAllow?`,
+          "Command Scan",
+          { tool: "bash", location: "command argument", pattern: undefined, attempts }
+        );
+        if (!ok) {
+          return {
+            block: true,
+            reason: [
+              `leakguard blocked bash: ${words}`,
+              "",
+              searchPatternHint(asPattern),
+              "",
+              remedyFor(undefined),
+            ].join("\n"),
+          };
+        }
+        return {};
+      }
+
+      const ok = await confirmBlock(
+        ctx,
+        "⚠️ Risky Command",
+        `leakguard: ${words}\n\nCommand will be blocked unless you allow it.\n\nAllow?`,
+        "Command Scan",
+        { tool: "bash", location: "command argument", attempts }
+      );
+      if (!ok) {
+        return {
+          block: true,
+          reason: blockMessage({
+            tool: "bash",
+            location: `command argument (${words})`,
+            attempts,
+          }),
+        };
+      }
     }
 
     return {};
@@ -567,7 +711,13 @@ export default function leakguardPersonal(pi: ExtensionAPI): void {
 
     let totalRedacted = 0;
     let contentChanged = false;
-    const newContent = event.content.map((block) => {
+    // Which rules fired, and where. The old note counted secrets but never said
+    // which patterns, so the model could not tell if a redaction was even
+    // relevant to its task.
+    const rulesFired: string[] = [];
+    const beforeCounts = { ...state.stats.redactedByPattern };
+    let changedIndex = -1;
+    const newContent = event.content.map((block, i) => {
       if (block.type !== "text") return block;
       const textBlock = block as { type: "text"; text: string };
 
@@ -577,6 +727,12 @@ export default function leakguardPersonal(pi: ExtensionAPI): void {
       if (result.count > 0) {
         totalRedacted += result.count;
         contentChanged = true;
+        if (changedIndex === -1) changedIndex = i;
+        for (const name of Object.keys(state.stats.redactedByPattern)) {
+          if ((state.stats.redactedByPattern[name] ?? 0) > (beforeCounts[name] ?? 0) && !rulesFired.includes(name)) {
+            rulesFired.push(name);
+          }
+        }
         return { ...textBlock, text: result.text };
       }
       return block;
@@ -586,9 +742,15 @@ export default function leakguardPersonal(pi: ExtensionAPI): void {
       state.stats.redactedSecrets += totalRedacted;
       audit({ ts: new Date().toISOString(), event: "redact", tool: event.toolName, count: totalRedacted });
 
-      const note = `\n[leakguard: ${totalRedacted} secret(s) redacted - security, not an error.\nIf you need this value, ask the human to run: /leakguard allow-once or /leakguard trust <pattern>]\n`;
-      if (newContent.length > 0 && newContent[0]?.type === "text") {
-        newContent[0] = { ...newContent[0] as { type: "text"; text: string }, text: note + (newContent[0] as { type: "text"; text: string }).text };
+      const repeat = isRepeatRedaction(event.toolName, rulesFired);
+      const note = redactionNote(totalRedacted, rulesFired, repeat);
+      // Attach to the block that actually changed. The old code always used
+      // index 0, so a redaction landing in a later text block arrived with no
+      // explanation and the model re-ran the tool to "get the real output".
+      const target = changedIndex >= 0 && newContent[changedIndex]?.type === "text" ? changedIndex : 0;
+      if (newContent.length > 0 && newContent[target]?.type === "text") {
+        const tb = newContent[target] as { type: "text"; text: string };
+        newContent[target] = { ...tb, text: note + tb.text };
       }
       return {
         content: newContent,
@@ -638,17 +800,36 @@ export default function leakguardPersonal(pi: ExtensionAPI): void {
     if (e.toolName === "write" || e.toolName === "edit") {
       const writeResult = await guardWritePath((e.input as WriteToolInput).path, ctx);
       if (writeResult.block) return writeResult;
-      if (isBlockMode(state.mode) && hasSecretMaterial(e.input)) {
+      if (isBlockMode(state.mode) && hasSecretMaterial(e.input, { path: (e.input as WriteToolInput).path })) {
+        // Name the pattern and the masked line, so the model can fix it in one
+        // pass instead of guessing which of 31 rules fired.
+        const payloadText = (() => {
+          try {
+            return typeof e.input === "string" ? e.input : JSON.stringify(e.input ?? "");
+          } catch {
+            return "";
+          }
+        })();
+        const pattern = describeSecretMatch(payloadText);
+        const masked = locateSecretMatch(payloadText);
+        const attempts = bumpAttempts(e.toolName, e.input);
         const ok = await confirmBlock(
           ctx,
           "⚠️ Secret in Write Payload",
-          "leakguard: write/edit payload contains secret-looking material.\n\nAllow this write?",
-          "Secret Payload"
+          `leakguard: this ${e.toolName} payload contains ${pattern ? `a "${pattern}"` : "secret-looking material"}.\n\nAllow this write?`,
+          "Secret Payload",
+          { pattern, masked, tool: e.toolName, attempts }
         );
         if (!ok) {
           return {
             block: true,
-            reason: `Blocked by ${EXTENSION_NAME}: write/edit payload contains secret-looking material`,
+            reason: blockMessage({
+              pattern,
+              masked,
+              tool: e.toolName,
+              location: "write payload",
+              attempts,
+            }),
           };
         }
       }
@@ -689,7 +870,7 @@ export default function leakguardPersonal(pi: ExtensionAPI): void {
           }
         }
       }
-      if (hasSecretMaterial(e.input)) {
+      if (hasSecretMaterial(e.input, { path: (e.input as { path?: string }).path })) {
         const ok = await confirmBlock(
           ctx,
           "⚠️ Secret in Query",
@@ -706,6 +887,30 @@ export default function leakguardPersonal(pi: ExtensionAPI): void {
     }
 
     return undefined;
+  });
+
+  /**
+   * Redaction repeat tracker. Bounded on purpose: a long session can redact
+   * thousands of values, and an unbounded map would leak memory. 512 entries is
+   * far more than any single turn produces.
+   */
+  const recentRedactions = new Set<string>();
+
+  /** Returns true when this tool already had a value redacted this session. */
+  const isRepeatRedaction = (toolName: string, rules: string[]): boolean => {
+    const key = `${toolName}:${[...rules].sort().join(",")}`;
+    const seen = recentRedactions.has(key);
+    if (!seen) {
+      if (recentRedactions.size > 512) recentRedactions.clear();
+      recentRedactions.add(key);
+    }
+    return seen;
+  };
+
+  pi.on("agent_end", async () => {
+    // Attempt counters are per-turn; a new turn means a new intent.
+    state.blockAttempts.clear();
+    recentRedactions.clear();
   });
 
   pi.on("tool_result", async (event, ctx) => {

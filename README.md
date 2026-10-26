@@ -54,6 +54,22 @@ So instead of trying to *catch* the injection, it stops the **harm** it causes:
 
 Think of leakguard as shrinking the blast radius, not as a detector.
 
+### Measured false positives (18 real repositories)
+
+The blocking layer was measured against every tracked file in 18 repositories,
+then the same files again after each fix:
+
+| stage | files flagged | what was firing |
+|---|---|---|
+| before | **95** | `[0-9a-f]{32,}` matching `UPSTREAM_SHA` provenance, npm `integrity` digests, `sha256:` image pins |
+| hex split into command/content layers | 21 | documentation and example configs |
+| context-aware path allowlist | 2 | a `SK proj` placeholder, lowercase PEM inside a detector |
+| placeholder list + case-sensitive `PEM_RE` | **0** | — |
+
+Guarded by `coverage.test.ts`: every real credential shape (`ghp_`, `sk-`,
+`sk-proj-`, `sk-ant-`, `AKIA`, `xoxb-`, PEM) must still be detected. A false
+negative is worse than a false positive, so that test gates any rule change.
+
 ### How pi-leakguard keeps false positives / false negatives in check
 
 - **It confirms, it does not silently block.** Every BLOCK asks via `ctx.ui.confirm`
@@ -67,10 +83,27 @@ Think of leakguard as shrinking the blast radius, not as a detector.
   instead of blocking it, which preserves agent utility (deploy still works via
   the environment) while preventing leakage — the preferred 2026 pattern of
   "don't give agents secrets".
-- **Context note.** Every redacted output gets a note explaining the redaction
-  and suggesting `/leakguard allow-once` if the value is needed. The model
-  understands it's security, not an error, and can ask the human for a one-time
-  bypass instead of wasting tokens on workarounds.
+- **Blocks that teach instead of just refusing.** Every block answers three
+  questions in one line: **what matched** (the pattern name), **where** (tool,
+  argument role, masked line number), and **what to do instead** (a remedy chosen
+  for that pattern family). A block that says only "secret-looking material"
+  leaves the model guessing, and guessing costs tokens on retries that cannot
+  converge — see `llm-hints.ts`.
+- **Repeat detection.** The second block of the same intent reads differently:
+  "Changing the command's syntax will NOT change the outcome — the check is about
+  the value, not the spelling. Stop retrying, or ask the human." The counter is
+  per-turn, so a genuinely new task starts fresh.
+- **Search-pattern recognition.** A sensitive token used as a *search pattern*
+  (`grep -n 'DOTENV|\\.env' file.ts`) is not a file access. It is recognised as
+  such and the block includes a copy-pasteable workaround instead of pushing the
+  model toward reading whole files.
+- **Documentation and fixtures are exempt.** `docs/`, `*.example.*`, `*.sample`,
+  `*.template`, `testdata/`, test files, and vendored code may contain example
+  credentials — that is what they are for. A real private key block is still
+  caught anywhere.
+- **Context note on redacted output.** Names the rules that fired, attaches to
+  the block that actually changed, and on a repeat says plainly that re-running
+  will not reveal the value.
 
 ## Features
 

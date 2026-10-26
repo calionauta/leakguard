@@ -72,7 +72,34 @@ export const SENSITIVE_PATH_PATTERNS: PathPattern[] = [
 ];
 
 // --- Ported secret material regexes (from @raquezha/noleaks) ---
-export const SECRET_VALUE_RE = /(bearer\s+[a-z0-9._~+/=-]{12,}|sk-[a-z0-9_-]{16,}|gh[pousr]_[a-z0-9_]{16,}|xox[baprs]-[a-z0-9-]{16,}|AKIA[0-9A-Z]{16}|[0-9a-f]{32,}|-----BEGIN [A-Z ]*PRIVATE KEY-----)/i;
+//
+// Two patterns on purpose, because the same shape has opposite cost in the two
+// layers that consume it:
+//
+//   SECRET_VALUE_RE   — commands, egress, encoding pipelines. A 64-hex blob
+//                       here is suspicious: it may be an HMAC key or a hashed
+//                       credential being shipped off-box. Commands are few and
+//                       high-stakes, so the bare-hex branch stays.
+//
+//   CONTENT_VALUE_RE  — file contents and tool output. A 64-hex blob here is
+//                       overwhelmingly metadata: 86 files across 18 real repos
+//                       matched (`UPSTREAM_SHA` provenance, npm `integrity`
+//                       digests, `sha256:` image pins, CI fixtures asserting a
+//                       digest is not a secret). Reading files is high-volume
+//                       and low-stakes, so bare hex is dropped.
+//
+// Hex with CONTEXT stays detectable in both layers via SECRET_ASSIGNMENT_RE
+// (`SOME_TOKEN=<hex>`) and the assignment patterns.
+export const SECRET_VALUE_RE = /(bearer\s+[a-z0-9._~+/=-]{12,}|sk-(?:ant-|proj-|svcacct-)?(?=[a-z0-9_-]*[0-9])[a-z0-9_-]{20,}|gh[pousr]_[a-z0-9_]{16,}|xox[baprs]-[a-z0-9-]{16,}|AKIA[0-9A-Z]{16}|[0-9a-f]{32,})/i;
+
+/** Same as SECRET_VALUE_RE minus the context-free hex branch. See the note above. */
+export const CONTENT_VALUE_RE = /(bearer\s+[a-z0-9._~+/=-]{12,}|sk-(?:ant-|proj-|svcacct-)?(?=[a-z0-9_-]*[0-9])[a-z0-9_-]{20,}|gh[pousr]_[a-z0-9_]{16,}|xox[baprs]-[a-z0-9-]{16,}|AKIA[0-9A-Z]{16})/i;
+/**
+ * PEM markers are case-SENSITIVE: a real key file writes BEGIN in uppercase.
+ * The lowercase substring appears inside secret DETECTORS, which must not flag.
+ */
+export const PEM_RE = /-----BEGIN [A-Z ]*PRIVATE KEY-----/;
+
 export const SECRET_KEY_RE = /(^|[^a-z0-9])(authorization|cookie|password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credential|refresh[_-]?token|id[_-]?token)([^a-z0-9]|$)/i;
 export const SECRET_ASSIGNMENT_RE = /(^|\n)\s*[A-Z0-9_]*(TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|CREDENTIAL|AUTH_?KEY|AUTH_?TOKEN|CONNECTION_?STRING|DSN)[A-Z0-9_]*\s*=\s*[^\s]+/i;
 export const ENV_DUMP_RE = /(^|[;&|\s])(env|printenv|set|export)(\s*(#.*)?$|\s*[;&|>])/;
@@ -155,21 +182,101 @@ export function shellWords(command: string): string[] {
  * Git object hashes (and short SHAs) are 7-40 char hex runs — benign, not
  * secrets. Strip them before high-entropy hex matching so legitimate git
  * commands (git show/cat-file/checkout/reset <sha>) are not false-positive
- * blocked. Longer hex (sha256=64, sha512=128) is preserved for secret
- * detection, since those lengths are never valid git SHAs.
+ * blocked.
+ *
+ * Commit SHAs are routinely echoed inside longer hex contexts (a 40-char SHA
+ * followed by more hex characters in a log line), so the strip is anchored on
+ * word boundaries — exactly how git prints them.
  */
 export function stripGitSHAs(text: string): string {
   return text.replace(/\b[0-9a-f]{7,40}\b/gi, " ");
 }
 
-export function hasSecretMaterial(value: unknown): boolean {
+/**
+ * Human-readable name for the first secret pattern that matches `text`.
+ * Used to tell the model WHAT matched instead of a bare "secret-looking
+ * material", which forced blind retries (see docs/leakguard-token-burn.md).
+ */
+export function describeSecretMatch(text: string): string | undefined {
+  const stripped = stripGitSHAs(text);
+  for (const pattern of SECRET_PATTERNS) {
+    const fresh = new RegExp(pattern.pattern.source, pattern.pattern.flags);
+    if (fresh.test(stripped)) return pattern.name;
+  }
+  if (CONTENT_VALUE_RE.test(stripped)) return "high-entropy value";
+  if (PEM_RE.test(text)) return "Private Key Block";
+  if (SECRET_ASSIGNMENT_RE.test(text)) return "secret assignment (KEY=value)";
+  return undefined;
+}
+
+/**
+ * The offending line with the secret itself masked, so the model can locate the
+ * problem without ever seeing the value. This is the difference between "your
+ * write was blocked" and "line 12 defines a GitHub PAT" — the former costs a
+ * blind retry, the latter costs nothing.
+ */
+export function locateSecretMatch(text: string): string | undefined {
+  const lines = text.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    if (line.trim().length === 0) continue;
+    if (!CONTENT_VALUE_RE.test(stripGitSHAs(line)) && !PEM_RE.test(line) && !SECRET_ASSIGNMENT_RE.test(line)) continue;
+    let masked = line;
+    for (const pattern of SECRET_PATTERNS) {
+      masked = masked.replace(new RegExp(pattern.pattern.source, pattern.pattern.flags), `[${pattern.name}]`);
+    }
+    masked = masked.replace(CONTENT_VALUE_RE, "[high-entropy value]");
+    return `line ${i + 1}: ${masked.trim().slice(0, 120)}`;
+  }
+  return undefined;
+}
+
+/**
+ * Paths where example credentials are LEGITIMATE and must not be treated as
+ * leaks: documentation, sample configs, test fixtures, vendored upstream code.
+ *
+ * Measured: of the 50 content-layer hits across 18 real repos, nearly all sat in
+ * `docs/`, `*.example.*`, test fixtures, or a vendored upstream project. Those
+ * files exist precisely to show what a credential looks like.
+ */
+const DOCUMENTATION_PATH_RE = /(?:^|[\\/])(?:docs?|man|examples?|samples?|fixtures?|testdata|__tests__|vendor|node_modules|third_party)(?:[\\/]|$)|(?:^|[\\/])[^\\/]*\.(?:example|sample|template)(?:\.[^\\/]+)?$|(?:^|[\\/])[^\\/]*(?:_test|_spec|_test_\w*)\.\w+$|\.(?:md|mdx|rst|adoc)$/i;
+
+/** True when `path` is documentation/example/fixture context. */
+export function isDocumentationPath(path: string | undefined): boolean {
+  if (!path) return false;
+  return DOCUMENTATION_PATH_RE.test(normalizePath(path));
+}
+
+/**
+ * Does this tool input carry secret material?
+ *
+ * `opts.path` lets callers pass the write/edit target so documentation and
+ * fixture files are not flagged for containing example credentials. Without it
+ * the behaviour is unchanged.
+ */
+export function hasSecretMaterial(
+  value: unknown,
+  opts?: { path?: string; skipDocumentation?: boolean }
+): boolean {
+  if (opts?.skipDocumentation !== false && isDocumentationPath(opts?.path)) {
+    // Still catch the one shape that a doc file must never carry: a real private
+    // key block. Everything else in a doc is illustrative by definition.
+    const text = typeof value === "string" ? value : JSON.stringify(value ?? "");
+    return /-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(text);
+  }
+  return hasSecretMaterialInner(value);
+}
+
+function hasSecretMaterialInner(value: unknown): boolean {
   if (value == null) return false;
   if (typeof value === "string") {
-    return SECRET_VALUE_RE.test(stripGitSHAs(value)) || SECRET_ASSIGNMENT_RE.test(value);
+    // CONTENT_VALUE_RE, not SECRET_VALUE_RE: this guards write/edit payloads,
+    // where a bare digest is normal file content, not an exfiltration attempt.
+    return CONTENT_VALUE_RE.test(stripGitSHAs(value)) || PEM_RE.test(value) || SECRET_ASSIGNMENT_RE.test(value);
   }
   if (typeof value !== "object") return false;
   for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
-    if (SECRET_KEY_RE.test(key) || hasSecretMaterial(item)) return true;
+    if (SECRET_KEY_RE.test(key) || hasSecretMaterialInner(item)) return true;
   }
   return false;
 }
@@ -277,7 +384,7 @@ export const SECRET_PATTERNS: SecretPattern[] = [
   { name: "AWS Access Key ID", pattern: /\bAKIA[0-9A-Z]{16}\b/g, severity: "critical" },
   { name: "AWS Secret Access Key", pattern: /(?:aws_secret_access_key|aws_secret)\s*[=:]\s*['"]?[A-Za-z0-9/+=]{40}['"]?/g, severity: "critical" },
   { name: "AWS Session Key", pattern: /\bASIA[0-9A-Z]{16}\b/g, severity: "high" },
-  { name: "OpenAI API Key", pattern: /\bsk-(?:proj-|svcacct-)?[A-Za-z0-9_\-]{20,}\b/g, severity: "high" },
+  { name: "OpenAI API Key", pattern: /\bsk-(?:ant-|proj-|svcacct-)?(?![A-Za-z0-9_-]*(?:your|xxxx|test|example|redacted|placeholder|dummy|fake|actual))[A-Za-z0-9_-]{20,}\b/g, severity: "high" },
   { name: "Anthropic API Key", pattern: /\bsk-ant-[A-Za-z0-9\-_]{20,}\b/g, severity: "high" },
   { name: "Google API Key", pattern: /\bAIza[A-Za-z0-9_-]{35}\b/g, severity: "high" },
   { name: "GitHub PAT", pattern: /\bghp_[A-Za-z0-9]{36,}\b/g, severity: "high" },
@@ -346,30 +453,60 @@ export function redactSecretsInText(
 
   let result = text;
   let totalCount = 0;
+  // Ranges already consumed by a previous (more specific) pattern. Without
+  // this, a generic rule later in the list re-redacts its own placeholder —
+  // REDACTION_PLACEHOLDER itself contains word characters, so e.g.
+  // "API Key Assignment" happily matches "[LEAKGUARD_REDACTED] — OpenAI API Key"
+  // and double-counts. SPECIFIC patterns are listed before generic ones, so
+  // marking spans and skipping overlap preserves the intended specificity.
+  const claimed: Array<[number, number]> = [];
+  const overlaps = (start: number, end: number): boolean =>
+    claimed.some(([s, e]) => start < e && end > s);
 
   for (const pattern of patterns) {
-    const freshRegex = new RegExp(pattern.pattern.source, pattern.pattern.flags);
-    const matches = result.match(freshRegex);
+    const matches = result.match(new RegExp(pattern.pattern.source, pattern.pattern.flags));
     if (!matches || matches.length === 0) {
       continue;
     }
 
-    const matchCount = matches.length;
+    // Evaluate against the ORIGINAL text positions by walking matches ourselves
+    let matchCount = 0;
+    const captureCount = countCaptureGroups(pattern.pattern.source);
+    const placeholder = `${REDACTION_PLACEHOLDER} — ${pattern.name}`;
+    const spans: Array<[number, number]> = [];
+
+    const walker = new RegExp(pattern.pattern.source, pattern.pattern.flags);
+    let m: RegExpExecArray | null;
+    while ((m = walker.exec(result)) !== null) {
+      const start = m.index;
+      const end = start + m[0].length;
+      if (!overlaps(start, end)) {
+        spans.push([start, end]);
+        matchCount++;
+      }
+      if (m[0].length === 0) walker.lastIndex++;
+    }
+
+    if (matchCount === 0) {
+      continue;
+    }
+
     totalCount += matchCount;
     stats.redactedByPattern[pattern.name] = (stats.redactedByPattern[pattern.name] ?? 0) + matchCount;
 
-    const captureCount = countCaptureGroups(pattern.pattern.source);
-    const placeholder = `${REDACTION_PLACEHOLDER} — ${pattern.name}`;
-
-    pattern.pattern.lastIndex = 0;
-    result = result.replace(pattern.pattern, (match: string, ...args: unknown[]) => {
-      const captureGroups = args.slice(0, captureCount);
-      const firstGroup = captureGroups.find((g): g is string => typeof g === "string" && g.length > 0);
-      if (firstGroup) {
-        return match.replace(firstGroup, placeholder);
-      }
-      return placeholder;
-    });
+    // replace right-to-left so earlier indices stay valid
+    for (const [start, end] of spans.sort((a, b) => b[0] - a[0])) {
+      const matched = result.slice(start, end);
+      const replacement = captureCount > 0
+        ? matched.replace(new RegExp(pattern.pattern.source, pattern.pattern.flags), (...args: unknown[]) => {
+            const groups = args.slice(0, captureCount);
+            const first = groups.find((g): g is string => typeof g === "string" && g.length > 0);
+            return first ? matched.replace(first, placeholder) : placeholder;
+          })
+        : placeholder;
+      result = result.slice(0, start) + replacement + result.slice(end);
+      claimed.push([start, start + replacement.length]);
+    }
   }
 
   return { text: result, count: totalCount };
