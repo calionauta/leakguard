@@ -2,6 +2,86 @@
 
 All notable changes to `pi-leakguard` are documented here.
 
+## [0.9.0] - 2026-10-26
+
+Detection is now delegated to [betterleaks](https://github.com/betterleaks/betterleaks).
+The 31 hand-written regexes are gone; pi-leakguard keeps the judgement layers.
+
+### Why
+
+A secret scanner answers "is there a credential in this text?". It has no concept
+of *"may the agent read this file"*. Those are different questions, and
+pi-leakguard had been answering both at once with one hand-maintained pattern
+list. That list was the weakest part: 31 expressions, no validators, and every
+false-positive fix (git SHAs, ask-hash, prose like sk-intent-need, supply-chain
+digests) needed another special case.
+
+betterleaks ships 471 rules, 463 compiled into the binary, 218 able to prove a
+finding valid/revoked/expired against the provider API. Those rules are someone
+else's maintenance burden now, and they are written against real provider
+response formats instead of guessed prefixes.
+
+### Removed
+
+- The 31 built-in regexes in SECRET_PATTERNS. Measured against 29 token shapes,
+  betterleaks covered 27. Every shape the regexes caught and the engine did not
+  was a shape they also over-matched. Keeping them as a fallback would have
+  bought no coverage and introduced a second rule set to keep in sync.
+- countCaptureGroups() and the offset-math redaction dance. The engine reports
+  StartLine/StartColumn/EndColumn, so locateSecretMatch() masks the exact
+  reported span instead of re-deriving it.
+
+### Added
+
+- engine.ts -- the adapter: detectWithEngine(), detectAll(), applyRedaction(),
+  engineStatus(), plus a RULE_NAMES map so the model keeps seeing "GitHub PAT"
+  and not github-pat. The two shapes betterleaks does not report stay here, each
+  with the measurement that justifies it: a bare Authorization: Bearer <opaque> line (its rule needs
+  a curl invocation to establish egress context) and op:// 1Password references
+  (pointers to a credential, not the credential).
+- Version drift reporting. The 463 default rules are compiled into the 22 MB
+  binary, so a version change IS a rule change. Startup and the git hook now
+  report drift rather than silently running a different rule set.
+- engine.test.ts (24 assertions) making the deletion falsifiable.
+
+### Changed
+
+- redactSecretsInText, scanForSecrets, describeSecretMatch, locateSecretMatch,
+  hasSecretMaterial, isTaintedEgress and commandHasSecret all ask the engine.
+  User-supplied extraSecretPatterns still run on top: additive, not a substitute.
+- describeSecretMatch() reports the rule that actually fired instead of guessing
+  from regex order.
+
+### Deliberately lost
+
+- A bare 64-character hex digest is no longer flagged. That branch produced most
+  of the false positives across 18 repositories: npm integrity fields, manifest
+  hashes, sha256: image pins, provenance files. A digest is not a credential. The
+  loss is asserted by a test rather than left implicit, and the exfil layers now
+  test with a real credential instead of a digest. If it ever returns, it must
+  return WITH CONTEXT (an egress or transform command), never as a bare pattern.
+
+### Cost
+
+~51 ms per tool result (process start dominates the scan), so ~5 s across a
+100-tool-result session. A keyword prefilter would cut this to near zero, but it
+would require embedding a copy of betterleaks' 462 keyword lists -- the same
+drift problem this release removes. Rejected on those grounds.
+
+### Fixed (found by the red-proof, all previously hidden by vacuous tests)
+
+- The OpenAI fixture had no digit in its body, so it satisfied neither the old
+  regex nor the engine -- the assertion had been passing on nothing.
+- The GitHub fixture body was a sequential digit-then-alphabet string, which
+  betterleaks correctly rejects via its stopwords filter. The old regex flagged
+  it; the engine does not, and the engine is right.
+- The PEM assertion expected the END marker to vanish, but the engine reports the
+  header only, so the END marker legitimately survives.
+- isTaintedEgress and hasSecretMaterial were still testing the deleted regex.
+
+Suite: 105 -> 140 assertions, all passing; tsc --noEmit clean. End-to-end
+validated against the git hook and the installed binary (13/13 checks).
+
 ## [0.8.0] - 2026-10-26
 
 ### Added

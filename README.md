@@ -23,7 +23,7 @@ When a layer fires, here's what happens:
 | Layer | Action | What it catches | False-positive risk | False-negative risk |
 | ----- | ------ | --------------- | ------------------ | ------------------ |
 | Path protection (read/write/delete) | BLOCK (confirm) | Access to `.env`, `~/.ssh`, `/etc/shadow`, etc. | Low — patterns are specific file names | Medium — custom secret paths need manual config |
-| Secret redaction (output) | REDACT | AWS/GitHub/Vault/1Password/DB-URL/etc. in tool output | Low — high-entropy + known prefixes | Medium — novel secret formats not in the pattern list |
+| Secret redaction (output) | REDACT | anything the betterleaks engine reports (471 rules) plus two residual shapes | Low -- engine rules carry context, entropy and stopword filters | Medium -- a credential shape with no upstream rule |
 | Symlink guard | BLOCK | Symlink bypass to a sensitive file | Very low | Low — `realpathSync` resolves before checking |
 | Obfuscation (NFKC/control chars) | BLOCK | Homoglyph / zero-width bypass in commands | Low — normal whitespace is allowed | Low — only rejects clear variance |
 | Shell exfil (env-dump, expansion, smuggle, discovery+secret) | BLOCK (confirm) | `env`, `$TOKEN`, `base64 \| curl`, `nmap`+secret | Low | Medium — arbitrarily obfuscated pipelines |
@@ -160,57 +160,116 @@ negative is worse than a false positive, so that test gates any rule change.
 
 ## What it redacts
 
-AWS, OpenAI, Anthropic, Google, GitHub (PAT + fine-grained), GitLab, Slack,
-Stripe, SendGrid, npm, HashiCorp **Vault**, **Doppler**, **1Password** (`op://`),
-JWTs, private-key blocks, DB URLs with credentials, generic
-`key=`/`password=`/`token=` assignments, and `Bearer` tokens.
+Whatever the engine reports: AWS (key id, secret, session), OpenAI, Anthropic,
+Google, GitHub (classic, fine-grained, OAuth, app, refresh), GitLab, Slack tokens
+and webhooks, Stripe, SendGrid, npm, HashiCorp Vault, Doppler, 1Password (secret
+key and service-account token), PEM private-key blocks, JWTs, database and
+credential URLs, and key=/password= assignments -- 471 rules in total, plus the
+two residual shapes listed below (Bearer headers without egress context, and
+op:// references).
 
-## Use with betterleaks (recommended, complementary)
+Because the engine ships 218 validators, a finding can also be reported as
+valid, revoked, or expired rather than merely "looks like a key".
 
-pi-leakguard answers "may the *agent* read this?" — a question no off-the-shelf
-scanner asks. The commit-time question ("did a credential just enter the diff?")
-is better served by a maintained rule engine. Do both:
+## Detection engine: betterleaks
 
-```sh
-brew install betterleaks            # or: the release tarball in ~/.bin
-betterleaks git --staged --config ~/.config/betterleaks/betterleaks.toml
+Detection is **delegated** to [betterleaks](https://github.com/betterleaks/betterleaks),
+a single static Go binary. pi-leakguard no longer carries a hand-written pattern
+list; it asks the engine, then decides what to do with the answer.
+
+```
+betterleaks    471 rules, 463 compiled into the binary, 218 able to prove a
+               finding valid/revoked/expired via the provider's API
+pi-leakguard   the judgement layers: may the agent read this path, is this
+               command exfiltrating, is this the agent's own retry, what do
+               we tell the model
 ```
 
-Measured on this machine (18 repos, 2026-10):
+That split is not cosmetic. A scanner answers "is there a credential in this
+text?". It has no concept of *"may the agent read this file"*. Five layers below
+are not detection at all, and nothing off-the-shelf replaces them.
 
-| | shell hook | gitleaks | betterleaks |
-|---|---|---|---|
-| staged scan | ~10 ms | ~620 ms | ~80 ms |
-| rules | 9 hand-written | 200+ | 471 (218 with API validation) |
-| false positives on a normal commit | 0 | 0 | 0 / 28 repos |
+### Install
 
-**There is no fallback pattern list, on purpose.** An earlier version of the
-git hook kept a hand-written copy of the patterns as a safety net. It was
-removed on measurement: across 18 token shapes betterleaks covered **all** of
-them and added extras the hand-written list never had (postgres URIs, JWTs, npm
-tokens). A copy of rules the engine already owns buys no coverage — and a copy
-that silently drifts is worse than none.
+```sh
+~/.bin/betterleaks-update --check     # installed vs latest, changes nothing
+~/.bin/betterleaks-update             # install/update, checksum-verified
+~/.bin/betterleaks-update --version 1.9.0   # pin or roll back explicitly
+```
 
-What survives is only what betterleaks is genuinely blind to:
+It lands in `~/.bin/betterleaks` with config at `~/.config/betterleaks/`. The
+git hook and this extension read the **same** binary and the **same** config, so
+there is one rule set to reason about, not two.
 
-| kept check | why betterleaks cannot do it |
+### Why the 31 patterns were deleted rather than kept as a fallback
+
+Measured against 29 token shapes, betterleaks covered **27**. Every shape the
+hand-written regexes caught and the engine did not was a shape they *also*
+over-matched. A copy of rules the engine already owns buys no coverage, and a
+copy that silently drifts is worse than no copy.
+
+The two shapes the engine genuinely misses are kept, each with its measurement
+recorded in `engine.ts`:
+
+| residual | why betterleaks does not report it |
 |---|---|
-| `.env` file refusal | a file with only `DEBUG=true` has no credential, so it exits 0 (measured) |
-| fail-closed when the binary is missing | a secret gate that passes when its scanner is gone is not a gate |
+| a bare `Authorization: Bearer <opaque>` line | its rule needs a `curl` invocation to establish egress context |
+| `op://` 1Password references | a pointer to a credential, not a credential |
+
+### One deliberate coverage loss
+
+A bare 64-character hex digest is **no longer flagged**. That single branch
+produced most of the false positives across 18 repositories: npm `integrity`
+fields, manifest hashes, `sha256:` image pins, provenance files. A digest is not
+a credential. The removal is asserted by a test, not left implicit, and the
+exfil layers now test with a real credential instead of a digest as a stand-in.
+
+If it ever needs to return, it must return **with context** (an egress or
+transform command), never as a bare pattern.
+
+### Cost, measured
+
+| | per tool result |
+|---|---|
+| detection (process start dominates) | ~51 ms |
+| a 100-tool-result session | ~5 s total |
+
+A keyword prefilter could cut this to near zero, but it would require embedding
+a copy of betterleaks' 462 keyword lists — the same drift problem this change
+removes. Rejected deliberately.
+
+### Version pinning
+
+Not vendored: the 463 default rules are compiled **into** the 22 MB binary, so
+vendoring means an opaque blob per platform and a binary diff for every rule
+change. Not auto-updating either: the rule set *is* the thing being trusted, and
+a scanner that silently swaps its own detection logic is unreviewable.
+
+In practice: `VERSION` records what is installed, and drift is **reported** at
+extension startup and on commit. It is never corrected on your behalf.
+
+## Git hook and CI
+
+The `pre-commit` gate uses the same binary, the same config, and the same rules.
+Only three checks live in shell because betterleaks cannot do them:
+
+| kept check | why |
+|---|---|
+| `.env` file refusal | a file holding only `DEBUG=true` contains no credential, so the engine exits 0 (measured) |
+| fail-closed when the binary is missing | a gate that passes when its scanner is gone is not a gate |
 | chain to repo-local hooks | a global `core.hooksPath` otherwise shadows `~/.git/hooks` |
 
-Another measured win from the same swap: `ask-<hash>` and git SHA fragments no
-longer false-positive. The hand-written list needed a two-step left-boundary
-workaround because a bare `sk-`/`[0-9a-f]{32,}` matched them; betterleaks has
-proper word boundaries and needs no workaround.
+Do **not** replay the engine's patterns by hand to "add coverage": that is the
+copy that drifts. Add a rule to `betterleaks.toml` instead.
 
-**Do not use `--baseline-path` as the gate.** It is safe for *new* and
-*rotated* secrets (verified), but it turns the gate into "fail only on changes
-since this file was generated", which ages badly.
+**Do not use `--baseline-path` as the gate.** It is safe for new and rotated
+secrets (verified), but it degrades into "fail only on changes since this file
+was generated", which ages badly.
 
-**Never report to `/dev/stdout`.** `-r /dev/stdout` intermittently fails with
-`permission denied` and the tool then exits 0 with zero findings. Use a real
-file path. This cost several wrong conclusions during evaluation.
+**Never write a report to `/dev/stdout`.** `-r /dev/stdout` intermittently fails
+with `permission denied` and the tool then exits 0 with zero findings —
+indistinguishable from clean. Use a real file path. This cost several wrong
+conclusions while evaluating.
 
 ## Commands
 
