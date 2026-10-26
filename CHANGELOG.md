@@ -2,7 +2,7 @@
 
 All notable changes to `pi-leakguard` are documented here.
 
-## [0.7.0] - 2026-10-26
+## [0.8.0] - 2026-10-26
 
 ### Added
 - **`llm-hints.ts` — every block now tells the model what matched, where, and what to do instead.** A block used to say only "secret-looking material", which named neither the pattern nor the location. In a real session that cost three full rewrites of one file: the model tried a literal, then a variable, then character codes, because each denial was indistinguishable and gave it nothing to act on. Blocks now carry the pattern name (`"GitHub PAT"`), the masked offending line (`line 12: token = "[GitHub PAT]"`), a remedy chosen per pattern family, and an explicit note that retrying with different syntax will not help. Remedies are pattern-specific: a private key is referenced by path, a password is read by key name, a test fixture is built at runtime.
@@ -10,6 +10,12 @@ All notable changes to `pi-leakguard` are documented here.
 - **Search-pattern false positive recognition.** `grep -n 'DOTENV|\\.env' file.ts` was blocked as a path access, after which the model read a 583-line file instead of grepping it — 5x the tokens. A sensitive token inside a quoted argument containing regex metacharacters is now recognised as a search pattern, and the block says so with a copy-pasteable workaround.
 - **Context-aware path allowlist.** `isDocumentationPath()` exempts `docs/`, `*.example.*`, `*.sample`, `*.template`, test fixtures, `testdata/`, and vendored upstream code. Those files exist to show what a credential looks like. Measured: of 50 content-layer hits across 18 real repos, nearly all were documentation. A real private key block is still caught even in docs.
 - `describeSecretMatch()` / `locateSecretMatch()`, plus `context.test.ts`, `llm-hints.test.ts` and `coverage.test.ts` (30 new assertions).
+
+### Added
+- **`/leakguard describe` — report redacted values by SHAPE, never by value.** This closes the one gap that made leakguard unusable for auditing: once a value was redacted, its nature was unknowable, so a finding could not be classified as real or false-positive, and the file could never be inspected. Describe mode reports length, character classes, entropy bucket, and a *published* vendor prefix, plus whether the value looks like prose or a placeholder — enough to decide `real` vs `false positive` while revealing nothing. An unknown prefix is never echoed: a 4-char prefix of a random 40-char secret is still 10 bits of it.
+
+  Verified against the file that previously could not be read at all (`picoclaw/pkg/config/example_security_usage.go`): 6 findings, and the shape immediately classified them — `sk-ant-` with a placeholder word and prose structure at line 43, `token-from-env`-style assignments at 51/72/74, and two high-entropy values at 545/552 whose surrounding lines read `# Channels` / `export ..._TOKEN=` — documentation, not a leak. The previous behaviour was to redact all six to `[LEAKGUARD_REDACTED]` and abandon the task.
+- `red-proof.ts` — runs the old block message and the new one side by side on the same input, plus the describe output for four value classes. The previous turn shipped the guidance layer with unit tests but never exercised it against the failures that motivated it.
 
 ### Fixed
 - **The pre-commit/push scan could not see `.env` files.** `index.ts` ran `git diff --cached -- . ':(exclude).env*'`, so `git add .env && git commit` produced no finding — the one thing a pre-commit scan most needs to catch. The exclusion is gone; staged env files are now detected by name and reported separately from secret-pattern hits.

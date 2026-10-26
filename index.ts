@@ -79,6 +79,7 @@ import {
   REPEAT_BLOCK_THRESHOLD,
   type BlockContext,
 } from "./llm-hints.js";
+import { describeSecretShape, describeNote } from "./shape.js";
 
 // ============================================================================
 // Types
@@ -110,6 +111,9 @@ interface ExtensionState {
    * failures. Counting per intent turns that into one clear message.
    */
   blockAttempts: Map<string, number>;
+  /** When true, redacted values are replaced by a SHAPE description instead
+   * of being removed. Reveals length/charset/entropy/known-prefix, never the value. */
+  describeRedactions: boolean;
 }
 
 interface ToolCallResult {
@@ -249,6 +253,7 @@ export default function leakguardPersonal(pi: ExtensionAPI): void {
     config: buildConfig(loaded.raw),
     cwdFallback: process.cwd(),
     blockAttempts: new Map<string, number>(),
+    describeRedactions: false,
     stats: {
       blockedCalls: 0,
       redactedSecrets: 0,
@@ -715,11 +720,26 @@ export default function leakguardPersonal(pi: ExtensionAPI): void {
     // which patterns, so the model could not tell if a redaction was even
     // relevant to its task.
     const rulesFired: string[] = [];
+    // Shapes of the values redacted, collected only in describe mode. Computed
+    // from the ORIGINAL text, before the placeholder replaced the value.
+    const describedShapes: string[] = [];
     const beforeCounts = { ...state.stats.redactedByPattern };
     let changedIndex = -1;
     const newContent = event.content.map((block, i) => {
       if (block.type !== "text") return block;
       const textBlock = block as { type: "text"; text: string };
+
+      if (state.describeRedactions) {
+        for (const pat of state.config.secretPatterns) {
+          const rx = new RegExp(pat.pattern.source, pat.pattern.flags);
+          for (const m of textBlock.text.matchAll(rx)) {
+            const val = m[0];
+            if (val && describedShapes.length < 12) {
+              describedShapes.push(`${pat.name}: ${describeSecretShape(val)}`);
+            }
+          }
+        }
+      }
 
       const result = redactSecretsInText(textBlock.text, state.stats, state.config.secretPatterns, {
         trustedTest,
@@ -743,7 +763,9 @@ export default function leakguardPersonal(pi: ExtensionAPI): void {
       audit({ ts: new Date().toISOString(), event: "redact", tool: event.toolName, count: totalRedacted });
 
       const repeat = isRepeatRedaction(event.toolName, rulesFired);
-      const note = redactionNote(totalRedacted, rulesFired, repeat);
+      const note = state.describeRedactions
+        ? describeNote(totalRedacted, describedShapes, rulesFired)
+        : redactionNote(totalRedacted, rulesFired, repeat);
       // Attach to the block that actually changed. The old code always used
       // index 0, so a redaction landing in a later text block arrived with no
       // explanation and the model re-ran the tool to "get the real output".
@@ -989,6 +1011,22 @@ export default function leakguardPersonal(pi: ExtensionAPI): void {
       return;
     }
 
+    // describe: redact by SHAPE instead of removing the value. Answers "is this a"
+    // "real secret or a false positive?" without revealing anything.
+    if (trimmed === "describe" || trimmed === "describe on" || trimmed === "describe off") {
+      const turnOn = trimmed !== "describe off" ? !state.describeRedactions : false;
+      state.describeRedactions = turnOn;
+      updateStatus(ctx);
+      notify(
+        ctx,
+        turnOn
+          ? "🔍 leakguard: describe mode ON — redacted values are reported by shape (length, charset, entropy, known prefix) instead of being removed."
+          : "🔒 leakguard: describe mode OFF — redacted values are removed again.",
+        "info"
+      );
+      return;
+    }
+
     // allow-once: skip redaction for the next tool_result (single use).
     // Only the human can grant this via confirm — the LLM cannot execute
     // pi commands. Flag resets after one tool_result regardless.
@@ -1018,7 +1056,8 @@ export default function leakguardPersonal(pi: ExtensionAPI): void {
       ctx,
       `${EXTENSION_NAME} commands:\n` +
       `  /leakguard                    - Show session statistics\n` +
-      `  /leakguard mode max|basic|auto|off - Change protection mode\n` +
+      `  /leakguard mode max|basic|auto|off - Change protection mode\n
+  /leakguard describe        - report redacted values by SHAPE, not value\n` +
       `  /leakguard stats              - Show session statistics (alias for /leakguard)\n` +
       `  /leakguard allow-once         - Skip redaction for one value (single use, resets after)\n` +
       `  /leakguard trust <pattern>    - Trust a pattern (literal or /regex/) for this session\n` +

@@ -101,6 +101,12 @@ negative is worse than a false positive, so that test gates any rule change.
   `*.template`, `testdata/`, test files, and vendored code may contain example
   credentials — that is what they are for. A real private key block is still
   caught anywhere.
+- **`/leakguard describe` — shape, not value.** When a value is redacted, the
+  model cannot tell a real leak from a false positive, so it either guesses or
+  gives up on the file. Describe mode reports length, character classes, entropy
+  bucket, a published vendor prefix, and whether the value looks like prose or a
+  placeholder. Enough to classify the finding; nothing that helps an attacker.
+  Unknown prefixes are never echoed.
 - **Context note on redacted output.** Names the rules that fired, attaches to
   the block that actually changed, and on a repeat says plainly that re-running
   will not reveal the value.
