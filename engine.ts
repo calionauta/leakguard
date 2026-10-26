@@ -48,6 +48,7 @@ export {
   ENGINE_CFG,
   ENGINE_VERSION_FILE,
   REDACTION_PLACEHOLDER,
+  RESIDUAL_PATTERNS,
   type EngineFinding,
   type EngineStatus,
   type ScanResult,

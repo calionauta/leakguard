@@ -9,7 +9,13 @@
 import { homedir } from "node:os";
 import { existsSync, realpathSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
-import { applyRedaction, detectAll, engineStatus, type EngineFinding } from "./engine.js";
+import {
+  applyRedaction,
+  detectAll,
+  engineStatus,
+  RESIDUAL_PATTERNS,
+  type EngineFinding,
+} from "./engine.js";
 
 export interface PathPattern {
   name: string;
@@ -518,12 +524,12 @@ export function redactSecretsInText(
 
 /** Residual-only pass, used when the engine is unavailable. */
 function redactResidualOnly(text: string, stats: RedactStats): { text: string; count: number } {
+  // Exactly the table the engine client owns. A local copy here is the drift
+  // this refactor exists to remove: the residual list gets ONE definition.
   let out = text;
   let count = 0;
-  for (const [name, rx] of [
-    ["Bearer Token", /\b(Author|ization:\s*)(Bea|rer\s+)[A-Za-z0-9_\-.]{20,}/gi],
-    ["1Password Secret Ref", /\bop:\/\/[^\s"']+/g],
-  ] as Array<[string, RegExp]>) {
+  for (const { name, pattern } of RESIDUAL_PATTERNS) {
+    const rx = new RegExp(pattern.source, pattern.flags);
     const before = out;
     out = out.replace(rx, `${REDACTION_PLACEHOLDER} — ${name}`);
     if (out !== before) {

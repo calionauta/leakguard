@@ -1,6 +1,14 @@
-# pi-leakguard
+# pi-leakguard (name reservation)
 
-Secret-exposure seatbelt for the [pi.dev](https://pi.dev) coding agent.
+This directory holds the npm name `pi-leakguard` only. **There is no code here** —
+`pi` resolves a git package from the repository root and has no subdirectory
+support, so the extension itself lives at the repo root (`index.ts`).
+
+```
+pi install git:github.com/calionauta/leakguard
+```
+
+The rest of this file describes the pi.dev host of leakguard.
 
 Blocks the agent from reading credential files, blocks a credential from leaving
 the machine, redacts credentials from tool output **before the model sees them**,
@@ -14,7 +22,7 @@ something, and what to tell the model when it refuses.
 ## Install
 
 ```sh
-# 1. the engine (required)
+# 1. the engine (required) — the installer resolves ~/.bin or ~/bin
 ~/.bin/betterleaks-update
 
 # 2. the extension

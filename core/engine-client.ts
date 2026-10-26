@@ -137,7 +137,7 @@ interface RawFinding {
  * the engine runs, and only against text the engine did not already flag at the
  * same value, so nothing is counted twice.
  */
-const RESIDUAL_PATTERNS: Array<{ name: string; pattern: RegExp }> = [
+export const RESIDUAL_PATTERNS: Array<{ name: string; pattern: RegExp }> = [
   // A bare auth header value. betterleaks has `curl-auth-header`, which needs a
   // curl invocation to establish egress context; a header sitting in a log or an
   // env file has no such context and passed through.

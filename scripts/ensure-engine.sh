@@ -27,31 +27,37 @@ for candidate in "${HOME}/.bin/betterleaks" "${HOME}/bin/betterleaks"; do
   fi
 done
 
+# The installer has the same two-layout problem as the engine itself: macOS keeps
+# it at ~/.bin, the Linux server at ~/bin. Resolving only ~/.bin reported "install
+# not present" on a host that had it, and skipped the drift notice entirely.
+installer=""
+for candidate in "${HOME}/.bin/betterleaks-update" "${HOME}/bin/betterleaks-update"; do
+  if [ -x "$candidate" ]; then
+    installer="$candidate"
+    break
+  fi
+done
+
 if [ -n "$found" ]; then
   # Present. Report drift (a newer release exists) but never install it: the
   # rule set is the thing being trusted. This is a notification, not an offer.
-  if [ -x "${HOME}/.bin/betterleaks-update" ]; then
-    status="$("${HOME}/.bin/betterleaks-update" --check 2>/dev/null | sed -n 's/^status *: *//p')"
+  if [ -n "$installer" ]; then
+    status="$("$installer" --check 2>/dev/null | sed -n 's/^status *: *//p')"
     case "$status" in
       *"update available"*)
-        note "pi-leakguard: betterleaks is installed but not the latest ($status)."
+        note "leakguard: betterleaks is installed but not the latest ($status)."
         note "  Rules are compiled into the binary, so this IS a rules change."
-        note "  Review and apply with: ~/.bin/betterleaks-update"
+        note "  Review and apply with: $installer"
         ;;
     esac
   fi
   exit 0
 fi
 
-warn "pi-leakguard: the betterleaks detection engine is not installed."
+warn "leakguard: the betterleaks detection engine is not installed."
 note "  Without it, credential detection is DEGRADED: path guards and the"
 note "  judgement layers still apply, but secret scanning does not run."
 note ""
-
-installer=""
-if [ -x "${HOME}/.bin/betterleaks-update" ]; then
-  installer="${HOME}/.bin/betterleaks-update"
-fi
 
 # Never prompt in a non-interactive context. A pipeline must not hang on a
 # question nobody can see, and an unattended install must not run network code.
@@ -66,7 +72,7 @@ if [ -n "${CI:-}" ] || [ "${CI:-}" = "true" ] || [ ! -t 0 ] || [ ! -t 2 ]; then
 fi
 
 if [ -z "$installer" ]; then
-  warn "  The installer (~/.bin/betterleaks-update) is not present either."
+  warn "  No installer found in ~/.bin or ~/bin; install betterleaks manually."
   note "  Fetch the binary from https://github.com/betterleaks/betterleaks/releases"
   exit 0
 fi
