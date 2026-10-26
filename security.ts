@@ -534,7 +534,11 @@ function redactResidualOnly(text: string, stats: RedactStats): { text: string; c
 // Network egress tools whose arguments/body must be scanned for secrets.
 // Ported concept from CredProxy/Bastion: separate secrets from egress.
 export const EGRESS_TOOLS = new Set([
-  "curl", "wget", "nc", "netcat", "ncat", "socat", "ftp", "sftp", "ssh", "scp",
+  "curl",
+  "http",
+  "https",
+  "httpie",
+  "xh", "wget", "nc", "netcat", "ncat", "socat", "ftp", "sftp", "ssh", "scp",
   "rsync", "telnet", "tftp", "fetch", "node", "python", "python3", "ruby", "perl",
 ]);
 
@@ -554,7 +558,7 @@ export const BASIC_AUTH_FLAG_RE = /(?:-|--)u(?:ser)?\s+[^\s:]+(?::[^\s]+)/i;
 // `Authorization: <token>` in documentation is not a credential in flight.
 const HEADER_VALUE = "(?!<)[A-Za-z0-9._~+\\/-]";
 export const SECRET_HEADER_RE = new RegExp(
-  "(?:authorization|x-api-key|x-auth-token|proxy-authorization)\\s*:\\s*(?:" +
+  "(?:authorization|x-api-key|x-auth-token|proxy-authorization)[\"'\\u201c]?\\s*:\\s*(?:" +
     "(?:bearer|basic|token|digest)\\s+" + HEADER_VALUE + "{4,}" +
     "|" + HEADER_VALUE + "{8,}" +
     ")",

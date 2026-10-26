@@ -2,6 +2,43 @@
 
 All notable changes to `pi-leakguard` are documented here.
 
+## [0.10.1] - 2026-10-26
+
+### Fixed — two false negatives found while attributing the false positives
+
+Attribution mattered: none of the three false positives your own extension
+blocked came from betterleaks. The engine returned **0 findings** on all of
+them. They were bugs in this extension's pre-engine regexes, which the swap
+preserved.
+
+Asking the same question in reverse exposed the more serious direction:
+
+- **A secret header in programmatic egress was never detected.**
+  `headers={"Authorization": "Bearer aB3xK9mQ2pR7"}` did not match, because the rule
+  required the colon immediately after the header name and the closing quote sat
+  between them. That is the most common way a script sends a credential.
+  betterleaks misses it too: its `curl-auth-header` rule needs a curl
+  invocation.
+- **`http`, `https`, `httpie` and `xh` were absent from EGRESS_TOOLS**, so an
+  HTTPie command carrying a secret header was allowed even when the header rule
+  matched it.
+
+Both are closed, with the false positive asserted alongside so the fix cannot
+reopen it. Suite: 146 -> 150.
+
+### Attribution of the four false positives
+
+| case | engine | verdict |
+|---|---|---|
+| documented header name | 0 findings | our regex |
+| heredoc mentioning ssh/curl/export | 0 findings | our exfil word list |
+| `export PATH=` alone | 0 findings | our exfil word list |
+| real header value via curl | 1 finding | neither — that one was correct |
+
+The extension is now responsible for exactly the egress context betterleaks
+cannot infer, and nothing else. `x-api-key` without a client is still caught by
+the engine's `generic-api-key`, so the layers do not overlap there either.
+
 ## [0.10.0] - 2026-10-26
 
 ### Added
