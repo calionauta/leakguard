@@ -55,8 +55,5 @@
     "docs",
     "README.md",
     "CHANGELOG.md"
-  ],
-  "workspaces": [
-    "packages/*"
   ]
 }
