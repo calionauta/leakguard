@@ -184,12 +184,25 @@ Measured on this machine (18 repos, 2026-10):
 | rules | 9 hand-written | 200+ | 471 (218 with API validation) |
 | false positives on a normal commit | 0 | 0 | 0 / 28 repos |
 
-**Why keep both engines** instead of replacing the shell hook: betterleaks'
-`aws-access-token` rule requires a companion `aws-secret-access-key` within 5
-lines and entropy > 3.0, so a lone exposed key id can pass. The shell hook's
-anchored prefix patterns still catch shapes betterleaks suppressed. Two
-independent engines disagreeing is signal, not redundancy — and both together
-cost ~90 ms.
+**There is no fallback pattern list, on purpose.** An earlier version of the
+git hook kept a hand-written copy of the patterns as a safety net. It was
+removed on measurement: across 18 token shapes betterleaks covered **all** of
+them and added extras the hand-written list never had (postgres URIs, JWTs, npm
+tokens). A copy of rules the engine already owns buys no coverage — and a copy
+that silently drifts is worse than none.
+
+What survives is only what betterleaks is genuinely blind to:
+
+| kept check | why betterleaks cannot do it |
+|---|---|
+| `.env` file refusal | a file with only `DEBUG=true` has no credential, so it exits 0 (measured) |
+| fail-closed when the binary is missing | a secret gate that passes when its scanner is gone is not a gate |
+| chain to repo-local hooks | a global `core.hooksPath` otherwise shadows `~/.git/hooks` |
+
+Another measured win from the same swap: `ask-<hash>` and git SHA fragments no
+longer false-positive. The hand-written list needed a two-step left-boundary
+workaround because a bare `sk-`/`[0-9a-f]{32,}` matched them; betterleaks has
+proper word boundaries and needs no workaround.
 
 **Do not use `--baseline-path` as the gate.** It is safe for *new* and
 *rotated* secrets (verified), but it turns the gate into "fail only on changes
