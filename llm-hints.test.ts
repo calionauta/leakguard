@@ -50,6 +50,21 @@ test("remedies are pattern-specific, not one generic sentence", () => {
   assert.match(pw, /names/i, "passwords: read key names only");
 });
 
+test("a path-guard block does not tell the model to rotate a credential", () => {
+  // Regression: the path guards used to reuse the credential wording, so naming
+  // a shell rc file produced "stop and ask the human to rotate it". Nothing was
+  // read, there is no credential, and the advice sends the model down a useless
+  // path (it cannot rotate what was never exposed).
+  const msg = blockMessage({
+    tool: "bash",
+    pattern: "sensitive file (shell rc)",
+    location: "grep reads 'file'",
+  });
+  assert.match(msg, /Nothing was read/, "must state that no value was exposed");
+  assert.doesNotMatch(msg, /rotate it/, "must not suggest rotating a credential that was never read");
+  assert.match(msg, /Name the file without opening it/, "must offer the applicable alternative");
+});
+
 test("repeat vs first attempt differ, and the repeat explicitly forbids retrying", () => {
   const first = blockMessage({ pattern: "GitHub PAT", tool: "write", attempts: 1 });
   const second = blockMessage({ pattern: "GitHub PAT", tool: "write", attempts: REPEAT_BLOCK_THRESHOLD });

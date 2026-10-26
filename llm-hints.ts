@@ -54,6 +54,13 @@ export function blockHeadline(ctx: BlockContext): string {
 export function remedyFor(pattern?: string): string {
   const p = (pattern ?? "").toLowerCase();
 
+  // Path guards fire on FILES, not values. Sending the model to "rotate the
+  // credential" here is wrong advice that also reads as "this is your fault":
+  // nothing was read, and the usual reason is a shell rc / env file that the
+  // command merely named.
+  if (p.includes("sensitive file") || p.includes("sensitive path")) {
+    return "Nothing was read, so no credential was exposed. Name the file without opening it (paths in a listing, a count, a yes/no check), or ask the human for the specific non-secret values you need.";
+  }
   if (p.includes("private key") || p.includes("pem")) {
     return "Do not print, copy, or transcribe key material. Reference the file by path and let the human use it where it belongs.";
   }

@@ -436,7 +436,7 @@ export default function leakguardPersonal(pi: ExtensionAPI): void {
     if (!ok) {
       return {
         block: true,
-        reason: `Blocked by ${EXTENSION_NAME}: read of sensitive path '${path}' (${check.category})`,
+        reason: blockMessage({ tool: "read", pattern: `sensitive file (${check.category})`, location: `path '${path}'`, masked: path }),
       };
     }
 
@@ -468,7 +468,7 @@ export default function leakguardPersonal(pi: ExtensionAPI): void {
     if (!ok) {
       return {
         block: true,
-        reason: `Blocked by ${EXTENSION_NAME}: write to sensitive path '${path}' (${check.category})`,
+        reason: blockMessage({ tool: "write", pattern: `sensitive file (${check.category})`, location: `path '${path}'`, masked: path }),
       };
     }
     return {};
@@ -561,7 +561,7 @@ export default function leakguardPersonal(pi: ExtensionAPI): void {
         if (!ok) {
           return {
             block: true,
-            reason: `Blocked by ${EXTENSION_NAME}: shell command '${commandName}' reads sensitive path '${p}'`,
+            reason: blockMessage({ tool: "bash", pattern: "sensitive file", location: `${commandName} reads '${p}'`, masked: p }),
           };
         }
         state.taintedPaths.add(resolvePath(ctx.cwd, p));
@@ -584,7 +584,7 @@ export default function leakguardPersonal(pi: ExtensionAPI): void {
         if (!ok) {
           return {
             block: true,
-            reason: `Blocked by ${EXTENSION_NAME}: shell command '${commandName}' writes to sensitive path '${p}'`,
+            reason: blockMessage({ tool: "bash", pattern: "sensitive file", location: `${commandName} writes to '${p}'`, masked: p }),
           };
         }
       }
@@ -608,7 +608,7 @@ export default function leakguardPersonal(pi: ExtensionAPI): void {
         if (!ok) {
           return {
             block: true,
-            reason: `Blocked by ${EXTENSION_NAME}: shell command '${commandName}' deletes sensitive path '${p}'`,
+            reason: blockMessage({ tool: "bash", pattern: "sensitive file", location: `${commandName} deletes '${p}'`, masked: p }),
           };
         }
       }
@@ -618,19 +618,19 @@ export default function leakguardPersonal(pi: ExtensionAPI): void {
     const obfuscation = checkObfuscation(input.command);
     if (obfuscation && isBlockMode(state.mode)) {
       const ok = await confirmBlock(ctx, "⚠️ Obfuscated Command", `leakguard: ${obfuscation}\n\nCommand will be blocked unless you allow it.\n\nAllow?`, "Obfuscation");
-      if (!ok) return { block: true, reason: `Blocked by ${EXTENSION_NAME}: ${obfuscation}` };
+      if (!ok) return { block: true, reason: blockMessage({ tool: "bash", location: "obfuscated command", masked: obfuscation }) };
     }
 
     const egress = checkEgressSecrets(input.command);
     if (egress) {
       const ok = await confirmBlock(ctx, "⚠️ Egress DLP", `leakguard: ${egress}\n\nCommand will be blocked unless you allow it.\n\nAllow?`, "Egress DLP");
-      if (!ok) return { block: true, reason: `Blocked by ${EXTENSION_NAME}: ${egress}` };
+      if (!ok) return { block: true, reason: blockMessage({ tool: "bash", location: "egress with credential", masked: egress }) };
     }
 
     const exfil = checkBashExfil(input.command);
     if (exfil && (isBlockMode(state.mode) || exfil.includes("secret") || exfil.includes("environment"))) {
       const ok = await confirmBlock(ctx, "⚠️ Exfiltration Risk", `leakguard: ${exfil}\n\nCommand will be blocked unless you allow it.\n\nAllow?`, "Exfiltration");
-      if (!ok) return { block: true, reason: `Blocked by ${EXTENSION_NAME}: ${exfil}` };
+      if (!ok) return { block: true, reason: blockMessage({ tool: "bash", location: "exfiltration risk", masked: exfil }) };
     }
 
     const words = checkBashWords(input.command, ctx.cwd, state.mode);
@@ -923,7 +923,7 @@ export default function leakguardPersonal(pi: ExtensionAPI): void {
         if (!ok) {
           return {
             block: true,
-            reason: `Blocked by ${EXTENSION_NAME}: write references tainted sensitive content`,
+            reason: blockMessage({ tool: "write", location: "payload references tainted sensitive content" }),
           };
         }
       }
@@ -945,7 +945,7 @@ export default function leakguardPersonal(pi: ExtensionAPI): void {
           if (!ok) {
             return {
               block: true,
-              reason: `Blocked by ${EXTENSION_NAME}: ${e.toolName} over sensitive path '${pathArg}' (${check.category})`,
+              reason: blockMessage({ tool: e.toolName, location: `sensitive path '${pathArg}' (${check.category})`, masked: pathArg }),
             };
           }
         }
@@ -960,7 +960,7 @@ export default function leakguardPersonal(pi: ExtensionAPI): void {
         if (!ok) {
           return {
             block: true,
-            reason: `Blocked by ${EXTENSION_NAME}: ${e.toolName} payload references secret-looking material`,
+            reason: blockMessage({ tool: e.toolName, location: "payload references secret-looking material" }),
           };
         }
       }
