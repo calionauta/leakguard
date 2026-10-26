@@ -2,6 +2,47 @@
 
 All notable changes to `pi-leakguard` are documented here.
 
+## [0.11.0] - 2026-10-26
+
+### Added — `scripts/verify-engine.py`, so the traps stop being re-learned
+
+Five measurements in this project were wrong at least once, each for the same
+reason: a conclusion drawn from a fixture or a scope that did not match the claim.
+This script encodes them and fails loudly instead of quietly.
+
+Checks: engine present and running; pinned vs running version (drift reported,
+never corrected); config parses; **`useDefault` is true and >400 rules resolve**,
+which is the executable answer to "did we overwrite betterleaks' rules?"; every
+path allowlist carries `targetRules`; no local rule reuses an engine id.
+
+The script is itself tested against four injected regressions — `useDefault`
+flipped off, a `targetRules` line commented out, a local rule claiming an engine
+id, and a missing engine — so a checker that only ever passes cannot ship. 5/5.
+
+It deliberately does **not** plant a credential to test detection: a secret gate
+blocks that, correctly. Those measurements stay manual and their numbers are
+recorded in the config header.
+
+### Added — `hooks/pre-commit` is now versioned
+
+The commit gate is the layer that actually stops a credential reaching a commit,
+and it existed on two machines with no history and no review. It is now in the
+repo with a README covering install, the three checks it keeps because the engine
+cannot do them, and the traps already accounted for (two engine layouts, never
+report to `/dev/stdout`, scan the staged diff rather than the tree).
+
+`package.json` gained a `files` list so `hooks/`, `scripts/`, `plugins/` and
+`docs/` ship with the published package instead of only existing in the repo.
+
+### Note on layering
+
+`useDefault = true` means the engine's 471 rules stay active; our 8 `lg-*` rules
+are add-only with `lg-` prefixed ids. The add-ons cover **legacy and variant
+shapes the engine deliberately does not match** — its own patterns require exact
+prefixes, lengths and suffixes. That is a narrower claim than the one previously
+in the config header ("restores coverage"), which was stale and is corrected
+there with the measured numbers.
+
 ## [0.10.1] - 2026-10-26
 
 ### Fixed — two false negatives found while attributing the false positives

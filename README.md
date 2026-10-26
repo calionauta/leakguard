@@ -248,7 +248,28 @@ a scanner that silently swaps its own detection logic is unreviewable.
 In practice: `VERSION` records what is installed, and drift is **reported** at
 extension startup and on commit. It is never corrected on your behalf.
 
+## Verifying the stack
+
+The measurements in this README are easy to re-derive **wrongly**: a fixture with
+a sequential alphabet fails betterleaks' own entropy filter and then looks like
+"the engine misses this shape"; `git` mode scans history while `dir` scans the
+working tree; `config show` omits `targetRules` so its absence proves nothing.
+
+`scripts/verify-engine.py` encodes those traps and checks the stack that can be
+checked without planting a credential:
+
+```sh
+python3 scripts/verify-engine.py        # exit 1 on any failure, 2 if engine missing
+```
+
+It verifies the engine runs, the pinned version matches (drift reported, never
+fixed), the config parses, **`useDefault` is true and 471 rules resolve**, every
+path allowlist is scoped with `targetRules`, and no local rule reuses an engine
+id. Five assertions, and it is itself tested against four injected regressions so
+it fails when it should.
+
 ## Git hook and CI
+
 
 The `pre-commit` gate uses the same binary, the same config, and the same rules.
 Only three checks live in shell because betterleaks cannot do them:

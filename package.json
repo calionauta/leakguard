@@ -1,6 +1,6 @@
 {
   "name": "pi-leakguard",
-  "version": "0.10.1",
+  "version": "0.11.0",
   "description": "Leak guard for pi.dev - blocks LLM access to sensitive paths, egress DLP, prompt-injection detection, taint tracking, and secret redaction. Inspired by @raquezha/noleaks.",
   "main": "index.ts",
   "type": "module",
@@ -38,5 +38,17 @@
   },
   "engines": {
     "node": ">=20"
-  }
+  },
+  "files": [
+    "index.ts",
+    "security.ts",
+    "engine.ts",
+    "context.ts",
+    "llm-hints.ts",
+    "hooks",
+    "scripts",
+    "plugins",
+    "docs",
+    "README.md"
+  ]
 }

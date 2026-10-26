@@ -1,0 +1,105 @@
+#!/bin/sh
+# Global secret gate for every git repo on this machine.
+#
+# Installed via `core.hooksPath`. It does NOT replace repo-local hooks: it
+# chains to them (see the tail), because a global hooksPath otherwise SHADOWS
+# ~/.git/hooks in every repo. Several repos on this host have local hooks and
+# silently losing them would be worse than having no global gate at all.
+#
+# WHAT RUNS HERE, AND WHY IT IS THIS SHORT
+#
+# Detection belongs to betterleaks (471 rules, 218 able to prove a finding
+# valid/revoked via the provider's API, ~80 ms staged). A previous version of
+# this file carried a second, hand-written pattern list as a fallback. It was
+# removed on measurement: against 18 token shapes betterleaks covered ALL of
+# them and added extras the shell list never had (postgres URIs, JWTs, npm
+# tokens). Keeping a copy of rules that the engine already owns is maintenance
+# with no coverage gain -- and a copy that silently drifts is worse than none.
+#
+# Two checks remain because betterleaks is genuinely blind to them:
+#
+#   1. .env files. A .env holding only DEBUG=true / PORT=8080 contains no
+#      credential, so betterleaks exits 0. Measured, not assumed. The file
+#      still does not belong in git.
+#   2. Missing binary. A security gate that silently passes when its scanner
+#      is absent fails open. This one fails closed.
+#
+# Bypass for one commit:  git commit --no-verify
+# (deliberately awkward: if you need it often, the rule is wrong, not you)
+
+set -u
+
+status=0
+
+# Two layouts exist in practice: ~/.bin on macOS, ~/bin on the Linux server.
+# Probe both rather than assuming, because a gate that cannot find its scanner
+# fails closed and would block every commit on the machine with the other layout.
+BL_BIN=""
+for candidate in "${HOME}/.bin/betterleaks" "${HOME}/bin/betterleaks"; do
+  if [ -x "$candidate" ]; then
+    BL_BIN="$candidate"
+    break
+  fi
+done
+[ -z "$BL_BIN" ] && BL_BIN="${HOME}/.bin/betterleaks"
+BL_CFG="${HOME}/.config/betterleaks/betterleaks.toml"
+
+# --- 1. fail closed if the engine is missing ------------------------------
+if [ ! -x "$BL_BIN" ] || [ ! -f "$BL_CFG" ]; then
+  echo "secret-gate: betterleaks is not installed at $BL_BIN" >&2
+  echo "  install it with: ~/.bin/betterleaks-update" >&2
+  echo "  or bypass once with: git commit --no-verify" >&2
+  echo "  (a secret gate that passes when its scanner is gone is not a gate)" >&2
+  exit 1
+fi
+
+# --- 1b. report version drift, but do not auto-update ---------------------
+# The rules are compiled into the binary, so a version change IS a rule change.
+# A security scanner that silently replaces its own detection logic would be
+# unreviewable, so drift is surfaced on stderr and the scan proceeds with the
+# version actually installed.
+if [ -f "$HOME/.config/betterleaks/VERSION" ]; then
+  pinned="$(cat "$HOME/.config/betterleaks/VERSION" 2>/dev/null || true)"
+  actual="$("$BL_BIN" --version 2>/dev/null | sed -n 's/.*version *\([0-9][0-9.]*\).*/\1/p' | head -1)"
+  if [ -n "$pinned" ] && [ -n "$actual" ] && [ "$pinned" != "$actual" ]; then
+    echo "secret-gate: betterleaks version drift (pinned $pinned, running $actual)." >&2
+    echo "  run ~/.bin/betterleaks-update to re-pin deliberately." >&2
+  fi
+fi
+
+# --- 2. refuse to stage a real .env ---------------------------------------
+# .example/.sample/.template are legitimate and must stay committable.
+blocked_env=""
+for f in $(git diff --cached --name-only --diff-filter=ACMR); do
+  case "$f" in
+    .env|*/.env|.env.*|*/.env.*)
+      case "$f" in
+        *.example|*.sample|*.template) ;;
+        *) blocked_env="$blocked_env $f"; status=1 ;;
+      esac
+      ;;
+  esac
+done
+if [ -n "$blocked_env" ]; then
+  echo "secret-gate: refusing to commit env file(s):$blocked_env" >&2
+  echo "  keep them out of git; commit an .env.example instead." >&2
+fi
+
+# --- 3. betterleaks over the staged diff ----------------------------------
+if ! "$BL_BIN" git --staged --config "$BL_CFG" --no-banner --log-level fatal >&2; then
+  echo "secret-gate: betterleaks reported a credential in the staged diff." >&2
+  echo "  if this is a fixture, build the string at runtime; if real, rotate it." >&2
+  status=1
+fi
+
+if [ "$status" -ne 0 ]; then
+  exit "$status"
+fi
+
+# --- 4. chain to the repo's own hook -------------------------------------
+# Without this, setting core.hooksPath globally disables every local hook.
+LOCAL_HOOK="$(git rev-parse --git-dir 2>/dev/null)/hooks/pre-commit"
+if [ -x "$LOCAL_HOOK" ]; then
+  exec "$LOCAL_HOOK" "$@"
+fi
+exit 0
