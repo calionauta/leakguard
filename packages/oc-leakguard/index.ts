@@ -18,6 +18,21 @@
  * Install (git, no npm publish needed):
  *   opencode plugin add github:calionauta/leakguard
  * or copy this directory into ~/.config/opencode/plugins/leakguard/.
+ *
+ * TWO ENTRY POINTS, ON PURPOSE
+ *
+ * OpenCode 2.x replaced the V1 plugin shape with V2, and the shapes are not
+ * compatible. A V1 module exports `{ id, server }`; the V2 loader rejects that
+ * with "Plugin must export a default definition with an id and an effect or setup
+ * function" and — critically — only WARNS. The plugin silently never ran.
+ *
+ * That failure is invisible from the inside: no error reaches the model, no hook
+ * is missing from the plugin's own perspective, and every unit test passes
+ * because the hooks really do work when invoked directly. It was found by reading
+ * ~/.local/share/opencode/log/opencode.log, not by testing the plugin.
+ *
+ * So both are exported: `server` for 1.x, `setup` for 2.x. Whichever the running
+ * harness understands is used; the other is ignored.
  */
 
 import {
@@ -128,4 +143,121 @@ export const Leakguard = async () => {
   };
 };
 
-export default { id: "leakguard", server: Leakguard };
+/**
+ * V2 adapter.
+ *
+ * V2 does not pass hooks as a plain object; it hands you a context and expects
+ * you to register each hook through it. The semantics we rely on are unchanged,
+ * so this only rewires: same verdicts, same messages, same redaction.
+ *
+ * The context shape is structural, not imported, because it is not published as a
+ * type and the plugin must load on both majors without a version check.
+ */
+type V2Args = Record<string, unknown>;
+
+interface V2Context {
+  location?: { directory?: string };
+  tool?: {
+    hook?: (
+      name: string,
+      handler: (call: unknown) => Promise<void>,
+    ) => Promise<unknown>;
+  };
+  session?: {
+    hook?: (
+      name: string,
+      handler: (request: any) => Promise<void>,
+    ) => Promise<unknown>;
+  };
+  event?: { subscribe?: (options?: { signal?: AbortSignal }) => AsyncIterable<any> };
+}
+
+export const setupLeakguardV2 = async (ctx: V2Context): Promise<() => Promise<void>> => {
+  const status = engineStatusLine();
+  offerInstall(status);
+
+  const toolHook = ctx.tool?.hook;
+  const sessionHook = ctx.session?.hook;
+
+  if (typeof toolHook === "function") {
+    // Before: same two checks, reading the call's declared arguments.
+    await toolHook("execute.before", async (raw) => {
+      const call = raw as { tool?: string; id?: string; sessionID?: string; input?: V2Args };
+      const args = (call.input ?? {}) as V2Args;
+      const tool = String(call.tool ?? "");
+
+      if (PATH_TOOLS.has(tool)) {
+        const target = String(args.filePath ?? args.path ?? args.file ?? "");
+        const reason = blockedPathReason(target);
+        if (reason) throw new Error(pathGuardMessage(tool, reason, target));
+      }
+
+      if (tool === "bash") {
+        const verdict = checkEgress(String(args.command ?? ""));
+        if (verdict.error || verdict.blocked) throw new Error(egressMessage(verdict));
+      }
+    });
+
+    // After: redact in place. V2 carries the result on the call object, so the
+    // text is rewritten there rather than in a separate output record.
+    await toolHook("execute.after", async (raw) => {
+      const call = raw as { tool?: string; result?: any; status?: string };
+      if (call.status !== "completed") return;
+      const result = call.result;
+      if (!result || typeof result !== "object") return;
+
+      const rewrite = (text: string): string => {
+        if (!text) return text;
+        const scan = detectWithEngine(text);
+        if (scan.findings.length === 0) return text;
+        const r = redactText(text, scan.findings);
+        return r.count > 0 ? r.text : text;
+      };
+
+      if (typeof (result as { content?: unknown }).content === "string") {
+        const before = (result as { content: string }).content;
+        const after = rewrite(before);
+        if (after !== before) (result as { content: string }).content = after;
+        return;
+      }
+
+      const content = (result as { content?: unknown }).content;
+      if (Array.isArray(content)) {
+        for (const part of content) {
+          if (part && part.type === "text" && typeof part.text === "string") {
+            part.text = rewrite(part.text);
+          }
+        }
+      }
+    });
+  }
+
+  // The engine state has to reach the MODEL, not just the console.
+  if (typeof sessionHook === "function") {
+    await sessionHook("context", async (request: any) => {
+      if (!status) return;
+      const system = request?.system;
+      if (!Array.isArray(system)) return;
+      const last = system[system.length - 1];
+      if (last && typeof last.text === "string") {
+        system[system.length - 1] = { ...last, text: `${last.text}\n\n${status}` };
+      } else {
+        system.push({ type: "text", text: status });
+      }
+    });
+  }
+
+  return async () => {
+    /* nothing to tear down: hook registrations end with the session */
+  };
+};
+
+/**
+ * One default that both majors accept. V2 validates `effect` or `setup`; V1 reads
+ * `server`. Extra keys are ignored by both.
+ */
+export default {
+  id: "leakguard",
+  server: Leakguard,
+  setup: setupLeakguardV2,
+};
