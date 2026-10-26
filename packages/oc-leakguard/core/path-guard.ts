@@ -64,15 +64,31 @@ export function blockedPathReason(target: string): string | undefined {
   return undefined;
 }
 
-/** A message a human, or a model that will retry, can act on. */
+/**
+ * The message both hosts show when a path is refused.
+ *
+ * Structure is deliberate and matches llm-hints.ts: what was blocked, where, and
+ * what to do about it. The earlier one-sentence version ("Read it by key name")
+ * told the model a remedy but not what had matched, so the only move it could see
+ * was retrying with a different spelling — which the message then had to forbid in
+ * the same breath, without saying why.
+ *
+ * Kept here rather than in the pi host because the OpenCode host has no
+ * llm-hints.ts and would otherwise keep the weaker wording.
+ */
 export function pathGuardMessage(tool: string, reason: string, target: string): string {
-  return (
-    `leakguard blocked ${tool} on ${reason}: ${target}\n` +
-    `Read it by key name, or ask the human to allow this one call. ` +
-    `Changing the path's spelling will not change the outcome — the check resolves ` +
-    `symlinks and matches the real path.`
-  );
+  return [
+    `leakguard blocked this ${tool}: ${reason}.`,
+    `  ${target}`,
+    "",
+    "Nothing was read, so no credential was exposed.",
+    "What to do, cheapest first:",
+    "  1. You probably do not need the contents. Reference the file by path if you",
+    "     only need to prove it exists, or ask the human whether it is set.",
+    "  2. Need one non-secret value from it? Ask the human for that value.",
+    "  3. Genuinely need the file? Ask the human to run `/leakguard allow-once`.",
+    "",
+    "Do not retry with different spelling, a relative path, or a symlink: the check",
+    "resolves the real path, so the outcome will be identical.",
+  ].join("\n");
 }
-
-/** Tools whose arguments name a file the agent intends to read or write. */
-export const PATH_TOOLS = new Set(["read", "write", "edit", "patch", "view"]);

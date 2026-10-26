@@ -70,7 +70,15 @@ export function remedyFor(pattern?: string): string {
   if (p.includes("assignment")) {
     return "This looks like KEY=value where the value is secret. If you are writing a config or test fixture, use an obvious placeholder (`your-key-here`) or build the value at runtime.";
   }
-  return "If this is a test fixture or a rule definition, build the string at runtime (string concatenation or character codes) instead of committing or echoing a literal. If it is a real credential, stop and ask the human to rotate it.";
+  // Fallback for a pattern with no curated remedy: a rule id added by an engine
+  // update, or a shape nobody wrote advice for yet. It must not guess, because a
+  // wrong remedy (e.g. "rotate it" for a file that was never read) sends the model
+  // down a path that cannot succeed.
+  return (
+    "Treat the value as live until proven otherwise: do not print it, copy it into another file, or send it anywhere. " +
+    "If you are writing a test fixture or documentation, use an obvious placeholder or build the string at runtime. " +
+    "If a task genuinely needs the value, stop and ask the human — they can allow this one call."
+  );
 }
 
 /**
@@ -82,10 +90,16 @@ export function remedyFor(pattern?: string): string {
 export function escapeHatches(): string {
   return [
     "Options, cheapest first:",
-    "  1. Do not need the value — proceed without it (most tasks do).",
-    "  2. Need to know it exists/shape only — ask for names, counts, or a yes/no check.",
-    "  3. Need the actual value — ask the human to run `/leakguard allow-once`.",
-    `Note: retrying with different quoting, variable indirection, or \`${REDACTION_PLACEHOLDER}\` will not help. The check is on the VALUE, not the syntax.`,
+    "  1. Do not need the value — proceed without it. Most tasks do not need the",
+    "     secret itself, only proof that it exists or that the shape is right.",
+    "  2. Need to know it exists or its shape — ask for a count, a yes/no, or the",
+    "     key NAMES only (e.g. `grep -o '^[A-Z_]*=' file` reads names, not values).",
+    "  3. Need the actual value — stop and ask the human. They can run",
+    "     `/leakguard allow-once` for this single call.",
+    "",
+    "Note: retrying with different quoting, escapes, variable indirection, base64, or",
+    `\`${REDACTION_PLACEHOLDER}\` will not help. The check is on the VALUE, not the`,
+    "syntax, so every variant lands on the same block and costs a turn.",
   ].join("\n");
 }
 

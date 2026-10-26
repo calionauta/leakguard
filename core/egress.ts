@@ -165,19 +165,38 @@ export function checkEgress(
 /** Message for a blocked command, phrased so a retrying model changes approach. */
 export function egressMessage(v: EgressVerdict): string {
   const what = v.found?.length ? ` (${v.found.join(", ")})` : "";
+
   if (v.error) {
-    return (
-      `leakguard: cannot verify this command (${v.error}).\n` +
-      `Refusing to run egress while secret detection is unavailable — a gate that ` +
-      `passes when its scanner is broken is not a gate.`
-    );
+    return [
+      `leakguard refused this command: secret detection is unavailable (${v.error}).`,
+      "",
+      "This is not a false positive and not about your command: the scanner that",
+      "decides whether the payload carries a credential could not run, so the gate",
+      "fails closed instead of waving everything through.",
+      "",
+      "What to do:",
+      "  1. Run the command without the network part, if the two can be separated.",
+      "  2. Install the engine (the human runs `~/.bin/betterleaks-update`, or",
+      "     `~/bin/betterleaks-update` on Linux) and try again.",
+      "  3. If neither is possible, ask the human to run it themselves.",
+    ].join("\n");
   }
-  return (
-    `leakguard blocked an ${v.reason}${what}.\n` +
-    `The VALUE tripped this, not the spelling — renaming a variable or re-quoting ` +
-    `will not help. If this is a test, generate the value at runtime instead of ` +
-    `writing it in the command.`
-  );
+
+  return [
+    `leakguard blocked this command: ${v.reason}${what}.`,
+    "",
+    "The VALUE tripped this, not the spelling — renaming a variable, re-quoting, or",
+    "splitting the command will produce the same block. This rule fires when a",
+    "command both leaves the machine AND carries a credential.",
+    "",
+    "What to do, cheapest first:",
+    "  1. Drop the credential from the command. Almost every diagnostic works",
+    "     without it (a HEAD request, a status endpoint, `--dry-run`).",
+    "  2. If the target is local (`localhost`, a unix socket), that is allowed —",
+    "     the rule is about sending secrets OFF the machine.",
+    "  3. Need the real call? Ask the human to run it, so the secret never enters",
+    "     this transcript.",
+  ].join("\n");
 }
 
 export { ENGINE_BIN, ENGINE_CFG };
