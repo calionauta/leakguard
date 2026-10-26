@@ -165,6 +165,40 @@ Stripe, SendGrid, npm, HashiCorp **Vault**, **Doppler**, **1Password** (`op://`)
 JWTs, private-key blocks, DB URLs with credentials, generic
 `key=`/`password=`/`token=` assignments, and `Bearer` tokens.
 
+## Use with betterleaks (recommended, complementary)
+
+pi-leakguard answers "may the *agent* read this?" — a question no off-the-shelf
+scanner asks. The commit-time question ("did a credential just enter the diff?")
+is better served by a maintained rule engine. Do both:
+
+```sh
+brew install betterleaks            # or: the release tarball in ~/.bin
+betterleaks git --staged --config ~/.config/betterleaks/betterleaks.toml
+```
+
+Measured on this machine (18 repos, 2026-10):
+
+| | shell hook | gitleaks | betterleaks |
+|---|---|---|---|
+| staged scan | ~10 ms | ~620 ms | ~80 ms |
+| rules | 9 hand-written | 200+ | 471 (218 with API validation) |
+| false positives on a normal commit | 0 | 0 | 0 / 28 repos |
+
+**Why keep both engines** instead of replacing the shell hook: betterleaks'
+`aws-access-token` rule requires a companion `aws-secret-access-key` within 5
+lines and entropy > 3.0, so a lone exposed key id can pass. The shell hook's
+anchored prefix patterns still catch shapes betterleaks suppressed. Two
+independent engines disagreeing is signal, not redundancy — and both together
+cost ~90 ms.
+
+**Do not use `--baseline-path` as the gate.** It is safe for *new* and
+*rotated* secrets (verified), but it turns the gate into "fail only on changes
+since this file was generated", which ages badly.
+
+**Never report to `/dev/stdout`.** `-r /dev/stdout` intermittently fails with
+`permission denied` and the tool then exits 0 with zero findings. Use a real
+file path. This cost several wrong conclusions during evaluation.
+
 ## Commands
 
 | Command                     | Description                                              |
