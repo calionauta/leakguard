@@ -107,13 +107,33 @@ check_oc_runtime() {
   fi
 
   # Newest "failed to load" for leakguard, and newest successful load.
-  last_fail="$(grep -a 'leakguard' "$log" 2>/dev/null | grep -a 'failed to load' | tail -1 || true)"
-  last_ok="$(grep -a 'leakguard' "$log" 2>/dev/null | grep -a 'msg="loading plugin"' | tail -1 || true)"
+  # One filter on the plugin, then classify. Chaining `grep leakguard | grep
+  # "failed to load"` required BOTH words on one line, which only holds while the
+  # log happens to echo `target=.../leakguard` — it silently matched nothing when
+  # the cause was the only populated field.
+  plugin_lines="$(grep -a 'plugins/leakguard' "$log" 2>/dev/null || true)"
+  last_fail="$(printf '%s\n' "$plugin_lines" | grep -a 'failed to load' | tail -1 || true)"
+  last_ok="$(printf '%s\n' "$plugin_lines" | grep -a 'msg="loading plugin"' | tail -1 || true)"
 
   fail_ts="$(printf '%s' "$last_fail" | sed -n 's/^timestamp=\([^ ]*\).*/\1/p')"
   ok_ts="$(printf '%s' "$last_ok" | sed -n 's/^timestamp=\([^ ]*\).*/\1/p')"
 
-  if [ -n "$last_fail" ] && { [ -z "$ok_ts" ] || [ "$fail_ts" \> "$ok_ts" ]; }; then
+  # Convert both to epoch FIRST, then compare numbers. Comparing ISO strings
+  # worked only by accident (equal widths) and hid the fail-newer-than-load case.
+  ts_to_epoch() {
+    if date -j -f '%Y-%m-%dT%H:%M:%S' '2000-01-01T00:00:00' +%s >/dev/null 2>&1; then
+      date -j -f '%Y-%m-%dT%H:%M:%S' "${1%%.*}" +%s 2>/dev/null || echo 0
+    else
+      date -d "${1%%.*}" +%s 2>/dev/null || echo 0
+    fi
+  }
+
+  fail_epoch="$(ts_to_epoch "$fail_ts")"
+  ok_epoch="$(ts_to_epoch "$ok_ts")"
+  case "$fail_epoch" in (*[!0-9]*|"") fail_epoch=0 ;; esac
+  case "$ok_epoch" in (*[!0-9]*|"") ok_epoch=0 ;; esac
+
+  if [ "$fail_epoch" -gt 0 ] && [ "$fail_epoch" -ge "$ok_epoch" ]; then
     cause="$(printf '%s' "$last_fail" | sed -n 's/.*cause="\(.*\)".*/\1/p' | cut -c1-90)"
     bad "the running process FAILED to load the plugin (latest event $fail_ts)"
     warn "  $cause"
@@ -130,8 +150,21 @@ check_oc_runtime() {
 
   # Did the file change AFTER the last successful load? Then the process is
   # serving older code even though nothing errored.
-  ok_epoch="$(date -j -f '%Y-%m-%dT%H:%M:%S' "${ok_ts%%.*}" +%s 2>/dev/null || date -d "${ok_ts%%.*}" +%s 2>/dev/null || echo 0)"
-  file_epoch="$(stat -f %m "$plugin" 2>/dev/null || stat -c %Y "$plugin" 2>/dev/null || echo 0)"
+  if date -j -f '%Y-%m-%dT%H:%M:%S' '2000-01-01T00:00:00' +%s >/dev/null 2>&1; then
+    ok_epoch="$(date -j -f '%Y-%m-%dT%H:%M:%S' "${ok_ts%%.*}" +%s 2>/dev/null || echo 0)"
+  else
+    ok_epoch="$(date -d "${ok_ts%%.*}" +%s 2>/dev/null || echo 0)"
+  fi
+  case "$ok_epoch" in (*[!0-9]*|"") ok_epoch=0 ;; esac
+  # BSD stat and GNU stat disagree on both flag and format, and GNU's `-f` is a
+  # filesystem query whose output is not a number. Detect the dialect rather than
+  # chaining fallbacks, because the BSD form "succeeds" on GNU with nonsense.
+  if stat -f %m / >/dev/null 2>&1; then
+    file_epoch="$(stat -f %m "$plugin" 2>/dev/null || echo 0)"   # BSD / macOS
+  else
+    file_epoch="$(stat -c %Y "$plugin" 2>/dev/null || echo 0)"   # GNU / Linux
+  fi
+  case "$file_epoch" in (*[!0-9]*|"") file_epoch=0 ;; esac
 
   if [ "$ok_epoch" -gt 0 ] && [ "$file_epoch" -gt "$ok_epoch" ]; then
     warn "files are NEWER than the last successful load ($ok_ts)"
