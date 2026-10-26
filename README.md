@@ -271,7 +271,25 @@ with `permission denied` and the tool then exits 0 with zero findings —
 indistinguishable from clean. Use a real file path. This cost several wrong
 conclusions while evaluating.
 
+## Other harnesses
+
+The engine and the judgement layer are portable; only the hook API is not.
+
+| harness | status |
+|---|---|
+| pi | full extension: hooks, confirm prompts, `/leakguard` commands, audit log |
+| OpenCode | `plugins/opencode.ts` — path guard, egress check, redaction via `tool.execute.before`/`.after` |
+
+Both read the **same** `~/.bin/betterleaks` and the **same** `betterleaks.toml`,
+so the detection rules are identical and there is one thing to update. Install
+the OpenCode plugin with:
+
+```sh
+cp plugins/opencode.ts ~/.config/opencode/plugins/leakguard.ts
+```
+
 ## Commands
+
 
 | Command                     | Description                                              |
 | --------------------------- | -------------------------------------------------------- |
