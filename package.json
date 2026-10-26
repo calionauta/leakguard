@@ -1,8 +1,8 @@
 {
-  "name": "pi-leakguard",
-  "version": "0.11.0",
-  "description": "Leak guard for pi.dev - blocks LLM access to sensitive paths, egress DLP, prompt-injection detection, taint tracking, and secret redaction. Inspired by @raquezha/noleaks.",
-  "main": "index.ts",
+  "name": "leakguard",
+  "version": "0.12.0",
+  "description": "Secret-exposure seatbelt for AI coding agents. One detection engine (betterleaks), two hosts: pi.dev and OpenCode.",
+  "main": "./index.ts",
   "type": "module",
   "scripts": {
     "test": "tsx --test security.test.ts context.test.ts llm-hints.test.ts coverage.test.ts shape.test.ts engine.test.ts",
@@ -11,17 +11,19 @@
   },
   "keywords": [
     "pi",
-    "pi-coding-agent",
-    "extension",
+    "pi-package",
+    "pi-extension",
+    "opencode",
     "security",
+    "secrets",
     "dlp",
-    "credentials"
+    "betterleaks"
   ],
   "author": "calionauta",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/calionauta/pi-leakguard"
+    "url": "git+https://github.com/calionauta/leakguard.git"
   },
   "pi": {
     "extensions": [
@@ -45,10 +47,17 @@
     "engine.ts",
     "context.ts",
     "llm-hints.ts",
+    "shape.ts",
+    "core",
+    "packages",
     "hooks",
     "scripts",
     "plugins",
     "docs",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "workspaces": [
+    "packages/*"
   ]
 }

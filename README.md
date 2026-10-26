@@ -1,16 +1,73 @@
-# pi-leakguard
+# leakguard
 
-**pi-leakguard** is a defense-in-depth "seatbelt" extension for [pi.dev](https://pi.dev).
-It keeps the coding agent from reading/writing/exfiltrating credentials, and
-redacts secrets from tool output before the model ever sees them.
+**One detection engine, two hosts.** Secret-exposure seatbelt for AI coding
+agents: it stops the agent reading credentials, redacts them from tool output, and
+blocks a credential from leaving the machine.
 
-> **Note:** this is an independent continuation of `@raquezha/noleaks`' ideas and security
-> layers, not an official fork. It keeps the MIT license and attribution.
+Detection is delegated to [**betterleaks**](https://github.com/betterleaks/betterleaks),
+a single static binary with 471 rules. This project is the layer a scanner cannot
+be: *may the agent read this file*, *is this command exporting it*, *what should
+the model be told when the gate refuses*.
 
-> **Security model:** this is a powerful defense-in-depth
-> "seatbelt", **not** an airtight sandbox. It stops accidental leaks and common AI
-> exfiltration tricks. For untrusted code or unattended automation, use a real sandbox
-> (Docker, Micro-VM) — don't rely on this alone.
+| host | package | install |
+|---|---|---|
+| [pi.dev](https://pi.dev) | `pi-leakguard` (repo root) | `pi install git:github.com/calionauta/leakguard` |
+| [OpenCode](https://opencode.ai) | `oc-leakguard` (`packages/oc-leakguard/`) | `opencode plugin add github:calionauta/leakguard` |
+
+**Neither needs an npm publish.** Both resolve a GitHub repo directly: `pi`
+installs from the repository root, OpenCode accepts a Git package specifier.
+
+Shared in `core/`: the engine client, the blocked-path rules, and the egress
+judgement. Per host, only the hook API and the wording of a refusal. That split is
+deliberate -- when these were two copies, the same egress blind spot existed in
+both at once and had to be fixed twice.
+
+> **Note:** an independent continuation of `@raquezha/noleaks`' ideas, not an
+> official fork. MIT licence, attribution kept.
+
+> **Security model:** a powerful defense-in-depth "seatbelt", **not** an airtight
+> sandbox. It stops accidental leaks and common exfiltration patterns. For
+> untrusted code or unattended automation, use a real sandbox (Docker, Micro-VM).
+
+## Install
+
+### 1. The engine (required)
+
+```sh
+~/.bin/betterleaks-update          # installs betterleaks, checksum-verified
+```
+
+Nothing works without it except the path guards. `pi-leakguard` asks once at
+install time; the OpenCode plugin and the git hook report DEGRADED and name the
+command. Updates are **reported, never applied** -- the rules are compiled into
+the binary, so a version bump is a rule change and must be reviewed.
+
+### 2. pi.dev
+
+```sh
+pi install git:github.com/calionauta/leakguard
+```
+
+### 3. OpenCode
+
+```sh
+opencode plugin add github:calionauta/leakguard
+# or, from a checkout:
+cp -r packages/oc-leakguard ~/.config/opencode/plugins/leakguard
+```
+
+### 4. The commit gate (optional, recommended)
+
+```sh
+cp hooks/pre-commit ~/.git-hooks/pre-commit && chmod +x ~/.git-hooks/pre-commit
+git config --global core.hooksPath ~/.git-hooks
+```
+
+### Verify, rather than assume
+
+```sh
+python3 scripts/verify-engine.py
+```
 
 ## Security model & limitations
 

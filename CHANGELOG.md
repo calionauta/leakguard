@@ -2,6 +2,65 @@
 
 All notable changes to `pi-leakguard` are documented here.
 
+## [0.12.0] - 2026-10-26
+
+### Changed — one engine client, two hosts
+
+The repository is now **leakguard**: one shared `core/` and two host packages.
+Splitting was the right call, but for a different reason than "different
+platforms" — the two adapters had become **copies**:
+
+| | lines | duplicated |
+|---|---|---|
+| `engine.ts` | 349 | `engineStatus`, `detectWithEngine`, `detectAll`, `applyRedaction` |
+| `plugins/opencode.ts` | 306 | `resolveEngine`, `detectSecrets`, `redactOutput`, `engineStatusLine` |
+
+The same four functions, twice. That duplication is where the bugs live: the
+egress blind spot — a secret header sent programmatically as a headers object,
+the most common way a script sends a credential — was invisible to **both**
+consumers at once, because both carried the same narrow assumption. Found once,
+had to be fixed twice.
+
+Now `core/` holds the engine client, the blocked-path rules and the egress
+judgement. Each host keeps only its hook API and its refusal wording.
+
+```
+core/engine-client.ts    locate, scan, parse, redact, report drift
+core/path-guard.ts       which paths are off-limits, and why
+core/egress.ts           real invocation + credential = block
+packages/pi-leakguard/   pi hook API (repo root: pi has no subdir support)
+packages/oc-leakguard/   OpenCode hook API
+```
+
+### Added
+
+- `scripts/sync-core.sh` (with `--check` for CI) copies `core/` into
+  `packages/oc-leakguard/` so the OpenCode package is self-contained while the
+  repo keeps one editable source. The copy is a build artifact; editing it
+  directly is overwritten on purpose.
+- `packages/*/README.md`, so each package documents its own install.
+
+### Renamed
+
+`calionauta/pi-leakguard` -> `calionauta/leakguard`. GitHub redirects the old URL,
+so existing `settings.json` entries keep working, but they are updated.
+
+### Both hosts install from git — no npm publish needed
+
+| host | command |
+|---|---|
+| pi | `pi install git:github.com/calionauta/leakguard` |
+| OpenCode | `opencode plugin add github:calionauta/leakguard` |
+
+`pi-leakguard` and `oc-leakguard` are both free on npm, so publishing later is an
+option rather than a mechanism.
+
+### Verified
+
+150/150 tests, `tsc` clean, `sync-core.sh --check` clean, `verify-engine.py` 5/5,
+and the **installed** OpenCode plugin passes 12/12 hook assertions — tested against
+`~/.config/opencode/plugins/leakguard/`, not just the repo copy.
+
 ## [0.11.0] - 2026-10-26
 
 ### Added — `scripts/verify-engine.py`, so the traps stop being re-learned
