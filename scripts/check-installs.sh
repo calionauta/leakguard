@@ -37,6 +37,8 @@ REMOTE_DIR="${LEAKGUARD_REMOTE_DIR:-~/.pi/agent/git/github.com/calionauta/leakgu
 problems=0
 warn() { printf '  \033[33m%s\033[0m\n' "$*"; problems=$((problems + 1)); }
 bad()  { printf '  \033[31m%s\033[0m\n' "$*"; problems=$((problems + 1)); }
+# Annotates a problem already counted; does not add to the total.
+hint() { printf '  \033[33m%s\033[0m\n' "$*"; }
 good() { printf '  \033[32m%s\033[0m\n' "$*"; }
 head_() { printf '\n\033[1m%s\033[0m\n' "$*"; }
 
@@ -60,7 +62,7 @@ check_pi() {
     good "checkout at $(git -C "$checkout" log --oneline -1 | cut -c1-60)"
   else
     bad "checkout is STALE: at ${installed%"${installed#???????}"}, repo is at ${expected%"${expected#???????}"}"
-    warn "fix: cd $checkout && git fetch -q origin main && git reset -q --hard origin/main"
+    hint "fix: cd $checkout && git fetch -q origin main && git reset -q --hard origin/main"
   fi
 
   # The runtime reads index.ts; a missing dependency there is a load failure.
@@ -80,7 +82,7 @@ check_oc_files() {
     good "installed plugin matches the repo"
   else
     sh "$ROOT/scripts/install-oc.sh" --check 2>&1 | sed 's/^/  /' || true
-    warn "fix: sh scripts/install-oc.sh"
+    hint "fix: sh scripts/install-oc.sh"
   fi
 }
 
@@ -150,12 +152,6 @@ check_oc_runtime() {
 
   # Did the file change AFTER the last successful load? Then the process is
   # serving older code even though nothing errored.
-  if date -j -f '%Y-%m-%dT%H:%M:%S' '2000-01-01T00:00:00' +%s >/dev/null 2>&1; then
-    ok_epoch="$(date -j -f '%Y-%m-%dT%H:%M:%S' "${ok_ts%%.*}" +%s 2>/dev/null || echo 0)"
-  else
-    ok_epoch="$(date -d "${ok_ts%%.*}" +%s 2>/dev/null || echo 0)"
-  fi
-  case "$ok_epoch" in (*[!0-9]*|"") ok_epoch=0 ;; esac
   # BSD stat and GNU stat disagree on both flag and format, and GNU's `-f` is a
   # filesystem query whose output is not a number. Detect the dialect rather than
   # chaining fallbacks, because the BSD form "succeeds" on GNU with nonsense.
@@ -223,9 +219,11 @@ check_engine() {
   good "found at $found ($("$found" --version 2>/dev/null | head -1 || echo 'version unknown'))"
 }
 
-if [ "${1:-}" = "--remote" ]; then
-  shift
-fi
+REMOTE=0
+for arg in "$@"; do
+  [ "$arg" = "--remote" ] && REMOTE=1
+done
+[ "${LEAKGUARD_CHECK_REMOTE:-}" = "1" ] && REMOTE=1
 
 check_pi
 check_oc_files
@@ -233,7 +231,7 @@ check_oc_runtime
 check_hook
 check_engine
 
-if [ "${1:-}" = "--remote" ] || [ "${LEAKGUARD_CHECK_REMOTE:-}" = "1" ]; then
+if [ "$REMOTE" = "1" ]; then
   printf '\n\033[1m=== %s ===\033[0m\n' "$REMOTE_HOST"
   if ssh -o ConnectTimeout=20 -o BatchMode=yes "$REMOTE_HOST" \
       "cd $REMOTE_DIR && sh scripts/check-installs.sh 2>&1" 2>/dev/null; then
