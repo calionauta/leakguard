@@ -2,7 +2,7 @@
   "name": "leakguard",
   "version": "0.12.0",
   "description": "Secret-exposure seatbelt for AI coding agents. One detection engine (betterleaks), two hosts: pi.dev and OpenCode.",
-  "main": "./index.ts",
+  "main": "./packages/oc-leakguard/index.ts",
   "type": "module",
   "scripts": {
     "test": "tsx --test security.test.ts context.test.ts llm-hints.test.ts coverage.test.ts shape.test.ts engine.test.ts",
@@ -55,5 +55,10 @@
     "docs",
     "README.md",
     "CHANGELOG.md"
-  ]
+  ],
+  "exports": {
+    ".": "./packages/oc-leakguard/index.ts",
+    "./pi": "./index.ts",
+    "./oc": "./packages/oc-leakguard/index.ts"
+  }
 }
