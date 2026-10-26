@@ -826,6 +826,41 @@ export default function leakguardPersonal(pi: ExtensionAPI): void {
     }
   });
 
+  // Detection state must reach the MODEL, not only the human. ui.notify draws on
+  // the status bar; an agent deciding what to run next never sees it, so it can
+  // spend a whole turn believing a gate is armed when it is not.
+  //
+  // One line, only when something is wrong, so a healthy session pays nothing.
+  pi.on("before_agent_start", async () => {
+    const e = engineStatus();
+    if (!e.available) {
+      return {
+        message: {
+          customType: "leakguard-engine-state",
+          content:
+            `leakguard: the betterleaks detection engine is unavailable (${e.reason}). ` +
+            `Credential detection is NOT running -- only path guards and the shell/egress ` +
+            `judgement layers are. Do not claim this session is protected from secret ` +
+            `exposure. Tell the human to run: ~/.bin/betterleaks-update`,
+          display: false,
+        },
+      };
+    }
+    if (e.drifted) {
+      return {
+        message: {
+          customType: "leakguard-engine-state",
+          content:
+            `leakguard: betterleaks drift -- pinned ${e.pinnedVersion}, running ${e.version}. ` +
+            `Rules are compiled into the binary, so detection differs from what was reviewed. ` +
+            `Ask the human before updating: ~/.bin/betterleaks-update`,
+          display: false,
+        },
+      };
+    }
+    return undefined;
+  });
+
   pi.on("session_shutdown", async () => {
     // Cleanup handled by session lifecycle
   });

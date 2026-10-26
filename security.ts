@@ -142,6 +142,21 @@ export const DISCOVERY_EXFIL = new Set([
   "rsync", "nmap", "tcpdump", "wireshark", "telnet", "tftp",
 ]);
 
+// A real network invocation: the tool name at the start of a command position
+// (start of string, after a shell separator, or after sudo/env). This is
+// stricter than a word-boundary match on the tool name, which fires on prose.
+export const EXFIL_INVOCATION_RE = new RegExp(
+  "(?:^|[;&|(]|\\$\\()\\s*(?:sudo\\s+)?(?:" +
+    [...DISCOVERY_EXFIL].sort((a, b) => b.length - a.length).join("|") +
+    ")\\b",
+  "i"
+);
+
+// A path that names a credential store. This is sensitive material on its own:
+// `nc host < ~/.env` leaks whatever is in that file, whatever its contents are.
+export const SENSITIVE_PATH_RE =
+  /(?:\.(?:env|aws|ssh|gnupg|kube|docker|npmrc|pypirc|netrc|git-credentials|secrets)(?=[\s/'"`)]|$)|\.env\b)/i;
+
 // Tools used to transform/encode material for smuggling
 export const ENCODE_TOOLS = new Set(["base64", "xxd", "openssl", "gpg", "hexdump"]);
 
@@ -336,9 +351,17 @@ export function checkBashExfil(command: string): string | undefined {
     }
   }
 
-  const hasExfilTool = [...DISCOVERY_EXFIL].some((t) => containsWord(deobfuscatedLower, t));
-  if (hasExfilTool && (SECRET_KEY_RE.test(command) || /\b(env|printenv|set|export)\b/.test(lower))) {
-    return "command combines network discovery/transfer with sensitive material";
+  // An exfil tool must appear as an INVOCATION, not as a word in prose. A commit
+  // message, a heredoc and a changelog entry all contain "ssh" and "curl" as
+  // ordinary English; `cat > file <<'EOF'` is not a network operation.
+  if (EXFIL_INVOCATION_RE.test(deobfuscatedLower)) {
+    // A secret key name, or an env dump, next to a real egress invocation.
+    // `set`/`export` alone is not exfiltration: `export` in prose, or exporting
+    // an unrelated variable, has no secret in it. Require a key that names a
+    // credential, which SECRET_KEY_RE already establishes.
+    if (SECRET_KEY_RE.test(command) || ENV_DUMP_RE.test(lower) || SENSITIVE_PATH_RE.test(command)) {
+      return "command combines network discovery/transfer with sensitive material";
+    }
   }
 
   return undefined;
@@ -522,7 +545,21 @@ export const CREDENTIALD_URL_RE = /[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^:\/\s]+:[^@\/\s
 export const BASIC_AUTH_FLAG_RE = /(?:-|--)u(?:ser)?\s+[^\s:]+(?::[^\s]+)/i;
 
 // Secret-bearing HTTP headers in egress payloads.
-export const SECRET_HEADER_RE = /(?:authorization|x-api-key|x-auth-token|proxy-authorization)\s*:/i;
+//
+// Deliberately requires a VALUE after the colon. The bare name
+// `Authorization:` appears in CHANGELOGs, docs, code comments and error
+// messages; flagging the name alone blocked documenting the very feature being
+// shipped. The value is also the part that would actually leave the machine.
+// A value must follow, and it must not be an angle-bracket placeholder:
+// `Authorization: <token>` in documentation is not a credential in flight.
+const HEADER_VALUE = "(?!<)[A-Za-z0-9._~+\\/-]";
+export const SECRET_HEADER_RE = new RegExp(
+  "(?:authorization|x-api-key|x-auth-token|proxy-authorization)\\s*:\\s*(?:" +
+    "(?:bearer|basic|token|digest)\\s+" + HEADER_VALUE + "{4,}" +
+    "|" + HEADER_VALUE + "{8,}" +
+    ")",
+  "i"
+);
 
 /**
  * Deterministic egress DLP: blocks any network egress command whose

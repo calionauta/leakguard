@@ -184,7 +184,32 @@ function engineStatusLine(): string {
   }
 }
 
+/**
+ * Offer to install a missing engine, with consent.
+ *
+ * Consent to install, notification to update -- the same policy the pi
+ * extension and the git hook follow, because it is about what a secret scanner
+ * is allowed to do without being asked. Runs at most once per process, and
+ * never without a terminal: a plugin that blocks on a prompt nobody can see is
+ * worse than a plugin that degrades loudly.
+ */
+let offerMade = false
+function offerEngineInstall(): void {
+  if (offerMade || ENGINE_BIN) return
+  offerMade = true
+  if (process.env.CI || !process.stdin.isTTY || !process.stderr.isTTY) {
+    console.warn("leakguard: betterleaks is missing; install it with ~/.bin/betterleaks-update")
+    return
+  }
+  console.warn(
+    "leakguard: the betterleaks detection engine is not installed.\n" +
+      "  Credential detection is DEGRADED; path guards still apply.\n" +
+      "  Install it with: ~/.bin/betterleaks-update",
+  )
+}
+
 export const Leakguard = async () => {
+  offerEngineInstall()
   const status = engineStatusLine()
 
   return {
@@ -244,9 +269,28 @@ export const Leakguard = async () => {
       }
     },
 
+    // The engine state must reach the MODEL, not only the console. An agent
+    // deciding what to run next does not read a warning banner, so it can spend
+    // a turn believing a gate is armed when it is not. Injected per prompt, and
+    // only when something is wrong, so a healthy session pays nothing.
+    "experimental.chat.system.transform": async (
+      _input: {},
+      output: { system?: string[] },
+    ) => {
+      if (status.includes("drift") || !ENGINE_BIN) {
+        const line = !ENGINE_BIN
+          ? "leakguard: betterleaks engine UNAVAILABLE -- credential detection is not running, " +
+            "only path guards and the egress rule. Do not claim this session is protected from " +
+            "secret exposure. Tell the human to run ~/.bin/betterleaks-update"
+          : `leakguard: betterleaks drift (${status}) -- rules are compiled into the binary, so ` +
+            "detection differs from what was reviewed. Ask the human before updating."
+        if (Array.isArray(output.system)) output.system.push(line)
+      }
+    },
+
     event: async ({ event }: { event: { type: string } }) => {
-      // Surface engine state once, at session start, rather than failing later.
       if (event?.type === "session.created") {
+        // A warning for the human; the system transform above covers the model.
         if (!ENGINE_BIN) {
           console.warn(
             `leakguard: ${status}\n  Install with ~/.bin/betterleaks-update. Path guards still apply.`,
