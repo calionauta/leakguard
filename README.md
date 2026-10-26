@@ -37,7 +37,7 @@ both at once and had to be fixed twice.
 ~/.bin/betterleaks-update          # installs betterleaks, checksum-verified
 ```
 
-Nothing works without it except the path guards. `pi-leakguard` asks once at
+Nothing works without it except the path guards. The pi extension asks once at
 install time; the OpenCode plugin and the git hook report DEGRADED and name the
 command. Updates are **reported, never applied** -- the rules are compiled into
 the binary, so a version bump is a rule change and must be reviewed.
@@ -93,7 +93,7 @@ When a layer fires, here's what happens:
 | Audit log | WARN (log only) | Every block/redact/allow event | None — observability | None |
 | Extensible config | n/a | User allow/block paths + extra secret patterns | None — user-defined | None — user-defined |
 
-### Why pi-leakguard does not detect prompt injection by pattern
+### Why leakguard does not detect prompt injection by pattern
 
 Detecting prompt injection with regex/heuristics is **not a consolidated
 industry strategy**. Attackers write injections in endless variations
@@ -127,7 +127,7 @@ Guarded by `coverage.test.ts`: every real credential shape (`ghp_`, `sk-`,
 `sk-proj-`, `sk-ant-`, `AKIA`, `xoxb-`, PEM) must still be detected. A false
 negative is worse than a false positive, so that test gates any rule change.
 
-### How pi-leakguard keeps false positives / false negatives in check
+### How leakguard keeps false positives / false negatives in check
 
 - **It confirms, it does not silently block.** Every BLOCK asks via `ctx.ui.confirm`
   (unless AUTO mode is active). This keeps the agent useful while still safe.
@@ -231,13 +231,13 @@ valid, revoked, or expired rather than merely "looks like a key".
 ## Detection engine: betterleaks
 
 Detection is **delegated** to [betterleaks](https://github.com/betterleaks/betterleaks),
-a single static Go binary. pi-leakguard no longer carries a hand-written pattern
+a single static Go binary. leakguard no longer carries a hand-written pattern
 list; it asks the engine, then decides what to do with the answer.
 
 ```
 betterleaks    471 rules, 463 compiled into the binary, 218 able to prove a
                finding valid/revoked/expired via the provider's API
-pi-leakguard   the judgement layers: may the agent read this path, is this
+leakguard      the judgement layers: may the agent read this path, is this
                command exfiltrating, is this the agent's own retry, what do
                we tell the model
 ```
@@ -382,20 +382,6 @@ cp plugins/opencode.ts ~/.config/opencode/plugins/leakguard.ts
 | `/leakguard trust list`     | List active trusted patterns                             |
 | `/leakguard trust clear`    | Clear all trusted patterns                               |
 | `/leakguard trust remove n` | Remove a trusted pattern by index                        |
-
-## Installation
-
-```bash
-pi install git:github.com/calionauta/pi-leakguard
-```
-
-Or pin a version:
-
-```bash
-pi install git:github.com/calionauta/pi-leakguard
-```
-
-Once installed, pi auto-loads leakguard on the next session.
 
 ## Development
 

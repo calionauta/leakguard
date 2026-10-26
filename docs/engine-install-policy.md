@@ -76,7 +76,7 @@ working one, so a broken download cannot take the git hook down with it.
 
 ## Where the install is offered
 
-- **`pi install git:github.com/calionauta/pi-leakguard`** — a `prepare` script
+- **`pi install git:github.com/calionauta/leakguard`** — a `prepare` script
   checks for the engine and, in an interactive terminal, asks whether to install
   it. In CI (`CI` set, or no TTY) it never prompts and never downloads; it prints
   the command and exits 0, so an install in a pipeline cannot hang.

@@ -251,9 +251,9 @@ export function locateSecretMatch(text: string): string | undefined {
   if (findings.length > 0) {
     const first = findings[0]!;
     const lines = text.split("\n");
-    const line = lines[Math.max(0, first.line - 1)] ?? "";
+    const line = lines[Math.max(0, (first.line ?? 1) - 1)] ?? "";
     const masked = line.split(first.value).join(`[${first.name}]`);
-    return `line ${first.line}: ${masked.trim().slice(0, 120)}`;
+    return `line ${first.line ?? 1}: ${masked.trim().slice(0, 120)}`;
   }
   const lines = text.split("\n");
   for (let i = 0; i < lines.length; i++) {
@@ -498,7 +498,14 @@ export function redactSecretsInText(
         rx.lastIndex++;
         continue;
       }
-      all.push({ name: pat.name, value: m[0], line: 0, startCol: 0, endCol: 0 });
+      all.push({
+        ruleId: pat.name.toLowerCase().replace(/\s+/g, "-"),
+        name: pat.name,
+        value: m[0],
+        line: 0,
+        startCol: 0,
+        endCol: 0,
+      });
     }
   }
 

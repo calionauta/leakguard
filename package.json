@@ -52,7 +52,6 @@
     "packages",
     "hooks",
     "scripts",
-    "plugins",
     "docs",
     "README.md",
     "CHANGELOG.md"

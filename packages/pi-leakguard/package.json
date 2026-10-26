@@ -1,16 +1,7 @@
 {
   "name": "pi-leakguard",
   "version": "0.12.0",
-  "description": "Secret-exposure seatbelt for the pi.dev coding agent: blocks secret-file access and credential egress, redacts credentials from tool output, gates git commits. Detection delegated to betterleaks.",
-  "type": "module",
-  "main": "./index.ts",
-  "pi": {
-    "extensions": ["./index.ts"]
-  },
-  "files": [
-    "index.ts",
-    "README.md"
-  ],
+  "description": "Name reservation for the pi.dev host of leakguard. The extension itself installs from the repository root: pi install git:github.com/calionauta/leakguard",
   "keywords": [
     "pi",
     "pi-package",
