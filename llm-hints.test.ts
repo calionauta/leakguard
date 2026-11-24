@@ -137,3 +137,20 @@ test("search pattern hint offers a concrete workaround", () => {
   assert.match(hint, /grep -nE/);
   assert.match(hint, /DOTENV/, "workaround must be copy-pasteable");
 });
+
+/**
+ * Regression: a call site that KNOWS what matched must pass `pattern` through.
+ *
+ * `remedyFor` switches on the pattern name. Two sites (egress-with-credential
+ * and the sensitive-path guard) knew the category but forwarded only
+ * `location`, so the model always got the generic fallback — including the
+ * "assume it is a live value" wording on a path guard that had read nothing.
+ * Same shape, wrong advice.
+ */
+test("a known pattern must select a curated remedy over the fallback", () => {
+  const known = blockMessage({ tool: "bash", pattern: "sensitive file (Environment)" });
+  const fallback = blockMessage({ tool: "bash" });
+  assert.notEqual(known, fallback, "pattern must change the remedy");
+  assert.match(known, /Nothing was read/, "path guards must say nothing was read");
+  assert.doesNotMatch(known, /Treat the value as live/, "must not use the value fallback");
+});
