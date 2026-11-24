@@ -183,6 +183,81 @@ export function withoutGoTemplates(command: string): string {
   return command.replace(GO_TEMPLATE_RE, " ");
 }
 
+/** True when the quoted pattern is an anchored uppercase NAME class with no value tail. */
+function isNamesOnlyPattern(pattern: string): boolean {
+  const p = pattern.trim();
+  if (!p.startsWith("^")) return false;
+  // Strip character classes first: `[A-Z_]` is exactly what we WANT, and its
+  // brackets must not be mistaken for wildcard syntax. Its quantifier is part
+  // of the class expression, so consume `*`/`+`/`?`/`{n,m}` immediately after.
+  const outside = p.slice(1).replace(/\[(?:\\.|[^\]\\])*\][*+?]?(?:\{\d*,?\d*\})?/g, "");
+  // Any wildcard left outside a class can consume the value after `=`.
+  if (/[.*?]/.test(outside)) return false;
+  // A `=` must be the last thing or absent: `=` followed by anything prints it.
+  const eq = outside.indexOf("=");
+  if (eq !== -1 && eq !== outside.length - 1) return false;
+  // Must actually mention an uppercase-name class or a run of name chars.
+  return /\[A-Z0-9_/.test(p) || /[A-Z][A-Z0-9_]{1,}/.test(p);
+}
+
+/**
+ * True when the whole command is a names-only INSPECTION of a sensitive file.
+ *
+ * The distinction this encodes: `grep -o '^[A-Z_]*=' .env` proves a variable
+ * EXISTS without emitting anything after the `=`. That is the remedy leakguard
+ * itself recommends ("ask for the key NAMES only"), yet it was blocked by the
+ * same rule as `cat .env` because both mention a sensitive path next to an ssh
+ * invocation. Blocking the recommended remedy is worse than blocking nothing:
+ * the model is then left with no legal move and burns turns probing variants.
+ *
+ * This is an ALLOW-LIST, deliberately narrow, because a false negative here
+ * leaks values. All of these must hold:
+ *   1. exactly one names-only grep, whose quoted pattern is an anchored
+ *      uppercase NAME class with no value tail (see isNamesOnlyPattern),
+ *      and whose file argument IS the sensitive path;
+ *   2. with that grep removed, no sensitive path, secret key name or env dump
+ *      remains anywhere in the command;
+ *   3. no tool that could read or move the file remains. `ssh h 'grep ...' ;
+ *      cat .env` fails (2). `ssh h 'grep ...' | curl -d @-` fails (3).
+ *
+ * Runs on the dequoted text so quoting/escaping variants collapse to one shape;
+ * an attacker cannot escape by re-quoting when the check is on the value.
+ */
+export function isNamesOnlyInspection(command: string): boolean {
+  const deq = command
+    .normalize("NFKC")
+    .replace(/\\(.)/g, "$1")
+    .replace(/['"]/g, "");
+
+  const g = /\bgrep\s+(?:-[a-zA-Z]*o[a-zA-Z]*|--only-matching)\s+(\S+)\s+(\S+)(?:\s|$)/.exec(deq);
+  if (!g) return false;
+  const pattern = g[1]!;
+  const file = g[2]!;
+  if (!isNamesOnlyPattern(pattern)) return false;
+  if (!SENSITIVE_PATH_RE.test(withoutGoTemplates(file))) return false;
+
+  const rest = deq.replace(g[0], " ");
+  if (SENSITIVE_PATH_RE.test(withoutGoTemplates(rest))) return false;
+  if (SECRET_KEY_RE.test(rest)) return false;
+  if (ENV_DUMP_RE.test(rest.toLowerCase())) return false;
+
+  // Nothing that could read, copy or transform the file may remain. Aggregators
+  // (sort/uniq/wc/head/tail) only reorder or count the NAME lines already
+  // produced, and ssh is the transport that was just validated.
+  const forbidden = [
+    "cat", "tee", "cp", "mv", "scp", "rsync", "dd", "tar", "zip", "gzip",
+    "base64", "xxd", "hexdump", "openssl", "gpg", "sed", "awk", "python",
+    "python3", "node", "ruby", "perl", "jq", "yq", "source", "curl", "wget",
+    "nc", "netcat", "socat", "ftp", "sftp", "nmap",
+  ];
+  const tokens = rest.split(/[^a-zA-Z0-9_.\/@-]+/).filter(Boolean);
+  for (const t of tokens) {
+    const base = t.toLowerCase().split("/").pop() ?? t.toLowerCase();
+    if (forbidden.includes(base)) return false;
+  }
+  return true;
+}
+
 export function matchesSensitivePath(command: string): boolean {
   return SENSITIVE_PATH_RE.test(withoutGoTemplates(command));
 }
@@ -393,10 +468,18 @@ export function checkBashExfil(command: string): string | undefined {
     // SENSITIVE_PATH_RE runs against a Go-template-stripped copy: a template
     // field like `{{.Config.Env}}` is a property, not a file, and matching it
     // blocked `docker inspect --format` as secret exfiltration.
+    //
+    // Names-only reads are removed first. `grep -o '^[A-Z_]*=' .env` proves a
+    // variable exists without printing any value -- and it is the exact remedy
+    // leakguard recommends in its own block message. Judging it with the same
+    // rule as `cat .env` left the model no legal move, so the advice and the
+    // enforcement disagreed. Every other mention of the path still blocks.
+    const judged = withoutGoTemplates(command);
+    if (isNamesOnlyInspection(command)) return undefined;
     if (
-      SECRET_KEY_RE.test(command) ||
-      ENV_DUMP_RE.test(lower) ||
-      SENSITIVE_PATH_RE.test(withoutGoTemplates(command))
+      SECRET_KEY_RE.test(judged) ||
+      ENV_DUMP_RE.test(judged.toLowerCase()) ||
+      SENSITIVE_PATH_RE.test(judged)
     ) {
       return "command combines network discovery/transfer with sensitive material";
     }
