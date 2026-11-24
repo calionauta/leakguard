@@ -624,7 +624,21 @@ export default function leakguardPersonal(pi: ExtensionAPI): void {
     const egress = checkEgressSecrets(input.command);
     if (egress) {
       const ok = await confirmBlock(ctx, "⚠️ Egress DLP", `leakguard: ${egress}\n\nCommand will be blocked unless you allow it.\n\nAllow?`, "Egress DLP");
-      if (!ok) return { block: true, reason: blockMessage({ tool: "bash", location: "egress with credential", masked: egress }) };
+      if (!ok) {
+        return {
+          block: true,
+          // `pattern` is what remedyFor() keys on. Without it the model got the
+          // generic "treat it as live" fallback even though this site knows it
+          // was a credential leaving the machine — the one case where "read the
+          // key NAMES only" is the remedy that actually unblocks the task.
+          reason: blockMessage({
+            tool: "bash",
+            pattern: "egress with credential",
+            location: "egress with credential",
+            masked: egress,
+          }),
+        };
+      }
     }
 
     const exfil = checkBashExfil(input.command);
@@ -945,7 +959,16 @@ export default function leakguardPersonal(pi: ExtensionAPI): void {
           if (!ok) {
             return {
               block: true,
-              reason: blockMessage({ tool: e.toolName, location: `sensitive path '${pathArg}' (${check.category})`, masked: pathArg }),
+              reason: blockMessage({
+                tool: e.toolName,
+                // Path guards fire on FILES, never on values. Passing the
+                // pattern selects the "nothing was read" remedy instead of the
+                // generic one, which told the model to rotate a credential that
+                // had not been opened.
+                pattern: `sensitive file (${check.category})`,
+                location: `sensitive path '${pathArg}' (${check.category})`,
+                masked: pathArg,
+              }),
             };
           }
         }
