@@ -2,6 +2,93 @@
 
 All notable changes to `leakguard` are documented here.
 
+## [0.13.1] - 2026-11-25
+
+Four guard refinements, all found by the gate blocking ordinary work in a live
+session rather than by reading the code. Each is a *specificity* fix: the
+blocking case is still blocked, the everyday command that was caught by
+accident no longer is.
+
+### Fixed — a Go template field was read as a sensitive path
+
+```
+docker inspect app --format "{{range .Config.Env}}{{println .}}{{end}}"
+```
+
+was blocked as "network discovery/transfer with sensitive material". The word
+boundary in `SENSITIVE_PATH_RE` was the cause: `\b` is satisfied by any non-word
+character, so the `}` closing the template terminated a segment that then matched
+as a dot-env file. The command only looked like egress because `ssh` appeared
+earlier in the line.
+
+The trailing boundary is now an explicit delimiter class, and the bare dot-env
+alternative uses a negative lookahead, so `.envrc` and `.env.local` still match
+while a template field does not. `withoutGoTemplates()` strips `{{ ... }}`
+actions before the exfil check consults the path rule, and
+`matchesSensitivePath()` is the guarded entry point callers should use. Verified
+that genuine egress still blocks, including reading the file over ssh and
+sourcing it before dumping the environment.
+
+### Fixed — blocked reads of a file that was never opened advised rotation
+
+The sensitive-path guard fires on a path *reference*, but its block message told
+the model to rotate a credential that had not been exposed. That advice cannot
+unblock the task, so the natural next move is a retry with different quoting —
+exactly the loop `llm-hints` exists to prevent.
+
+`remedyFor()` keys its advice on the pattern name. Two call sites knew the
+category but built the `BlockContext` with only `location`, so the model always
+received the generic fallback. Both now forward the pattern. The path guards also
+gained their own remedy: verify what was actually read before treating anything
+as live.
+
+### Fixed — the names-only read our own refusal recommends was blocked
+
+```
+ssh h 'grep -o "^[A-Z_]*=" .env'
+```
+
+was blocked with the same reason as a full file read — and that shape is
+verbatim what the block message tells the model to use: *"ask for the key NAMES
+only"*. Blocking the recommended remedy is worse than blocking nothing: the model
+is left with no legal move and burns turns probing variants. It hit three times
+in one session.
+
+`isNamesOnlyInspection()` is an allow-list rather than a loosened regex. It
+requires exactly one `grep` with `-o`/`--only-matching`, an anchored uppercase
+NAME class, no value tail, and its file argument *is* the sensitive path; with
+that grep removed, no sensitive path, secret assignment or env dump may remain,
+and no reader/transform/egress tool (`cat`, `sed`, `awk`, `curl`, `nc`, …). A
+second read appended with `;`, a pipe to `curl`, and a value tail all still
+block. It runs on dequoted text, so re-quoting cannot escape it.
+
+### Fixed — `chmod`/`chown` blocked every invocation
+
+Both sat in `CRITICAL_UTILITIES`, so `chmod +x ./run.sh` was refused with
+"command uses critical system utility" while wiring a hook — three turns lost,
+and the work went around the guard through a Python one-liner instead. A guard
+that cries wolf on a daily command teaches the agent to route around it, which
+is worse than not having the check.
+
+`permissionChangeDanger()` now blocks only:
+
+- a world-writable target (`777`, `666`, `o+w`, `a+w`, `+w`);
+- privilege escalation (`sudo` / `doas` / `su`);
+- a recursive change at or above `/`, `/etc`, `/usr`, `/var`, `/home`, `/opt`,
+  `/root`, `~`;
+- a change naming a sensitive (protected) path.
+
+Everything else is an ordinary permission change and is allowed. The reason now
+names what is wrong instead of the binary.
+
+### Notes
+
+- Four new test files' worth of coverage: `sensitive-path.test.ts` is now in
+  `npm test`, and the allow side of each rule is asserted, not only the block
+  side. All new tests fail against 0.13.0 and pass here. Suite: **164** passing.
+- Patch release: every change narrows a false positive. No blocked case from
+  0.13.0 becomes allowed, apart from the ones that were misfiring.
+
 ## [0.13.0] - 2026-10-26
 
 ### Fixed — the OpenCode plugin had never loaded
