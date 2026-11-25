@@ -137,10 +137,19 @@ export const TRANSFORM_COMMANDS = new Set([
   "git show", "git cat-file", "ls-tree",
 ]);
 
-// Critical system utilities blocked even as nested arguments
+// Critical system utilities blocked even as nested arguments.
+//
+// `chmod`/`chown` are NOT here: they are ordinary, daily commands and blocking
+// every invocation is a false positive (adding the exec bit to a script was
+// blocked during an ordinary task). They are handled by
+// `checkPrivilegeEscalation` instead, which blocks only the shapes that can
+// actually damage the machine or widen access.
 export const CRITICAL_UTILITIES = new Set([
-  "chmod", "chown", "passwd", "useradd", "userdel", "mkfs", "dd", "shred",
+  "passwd", "useradd", "userdel", "mkfs", "dd", "shred",
 ]);
+
+// Permission-changing commands. Blocked only in a dangerous shape, not on sight.
+export const PERMISSION_COMMANDS = new Set(["chmod", "chown"]);
 
 // Discovery / exfiltration tools
 export const DISCOVERY_EXFIL = new Set([
@@ -177,6 +186,65 @@ export const SENSITIVE_PATH_RE = new RegExp(
   `(?:${SENSITIVE_SEGMENT}${SENSITIVE_BOUNDARY}|\\.env(?![\\w-]))`,
   "i"
 );
+
+/**
+ * Decide whether a `chmod`/`chown` invocation is actually dangerous.
+ *
+ * Blocking every permission change is a false positive on ordinary work (adding
+ * an exec bit to a script, fixing group ownership on a build dir), and a guard
+ * that cries wolf on daily commands trains the agent to route around it.
+ *
+ * Dangerous means one of:
+ *   - a world-writable target (`777`, `o+w`, `a+w`, `+w`) - anyone can modify it;
+ *   - escalation (`sudo`/`doas`/`su`) - needs privileges we should not hand out;
+ *   - a recursive change at or above the filesystem root, `$HOME`, or `/etc`.
+ *
+ * Returns the reason, or undefined when the command is an ordinary change.
+ */
+export function permissionChangeDanger(command: string, words: string[]): string | undefined {
+  const lowered = words.map((w) => w.toLowerCase());
+  // `-R`, `-r`, `-rf`, `-Rh`, `--recursive` all count; but only a flag token.
+  const recursive = lowered.some((w) => /^-[a-z]*r[a-z]*$/i.test(w) || w === "--recursive");
+
+  // World-writable: 777, 0777, 666-style modes, or the symbolic equivalents.
+  for (const w of words) {
+    const mode = w.replace(/^0+/, "");
+    if (/^[0-7]{3,4}$/.test(w) || /^[0-7]{1,4}$/.test(mode)) {
+      const digits = mode.padStart(3, "0").slice(-3);
+      // other-write bit set
+      if (Number(digits[2]) & 2) {
+        return `command sets world-writable permissions (${w})`;
+      }
+    }
+    if (/^[oa]\+w$/.test(w) || /^\+w$/.test(w)) {
+      return `command sets world-writable permissions (${w})`;
+    }
+  }
+
+  if (lowered.some((w) => w === "sudo" || w === "doas" || w === "su")) {
+    return "command changes permissions with privilege escalation";
+  }
+
+  if (recursive) {
+    for (const w of words) {
+      if (/^[-+]/.test(w)) continue;
+      const p = w.replace(/\/+$/, "") || "/";
+      const rootish = new Set(["/", "/etc", "/usr", "/var", "/home", "/opt", "/root"]);
+      if (rootish.has(p) || p === "$" + "HOME" || p === "~") {
+        return `command changes permissions recursively at ${p}`;
+      }
+    }
+  }
+
+  // A chmod/chown naming a sensitive path is still a real concern.
+  for (const w of words) {
+    if (/^[-+]/.test(w)) continue;
+    const sens = checkPathSensitivity(resolvePath(process.cwd(), w));
+    if (sens.matched) return `command changes permissions on protected path: ${w}`;
+  }
+
+  return undefined;
+}
 
 /** Drop Go template actions so their field paths cannot read as filenames. */
 export function withoutGoTemplates(command: string): string {
@@ -496,6 +564,11 @@ export function checkBashWords(command: string, cwd: string, mode: "max" | "basi
 
     if (CRITICAL_UTILITIES.has(baseWord)) {
       return `command uses critical system utility: ${baseWord}`;
+    }
+
+    if (PERMISSION_COMMANDS.has(baseWord)) {
+      const danger = permissionChangeDanger(baseWord, words);
+      if (danger) return danger;
     }
 
     const pathReason = checkPathSensitivity(resolvePath(cwd, word));

@@ -186,7 +186,32 @@ test("checkEgressSecrets does not false-positive on nc substring", () => {
 test("checkBashWords blocks critical utility as argument", () => {
   const reason = checkBashWords("sudo chmod 777 /etc/shadow", CWD, "max");
   assert.ok(reason, "expected sudo chmod to be blocked");
-  assert.match(reason!, /critical system utility/i);
+  // The reason is now precise (what is dangerous about it), not the generic
+  // "critical system utility" that also fired on `chmod +x script.sh`.
+  assert.match(reason!, /world-writable|privilege escalation/i);
+});
+
+// ============================================================================
+// chmod/chown: block the dangerous shape, not the ordinary command
+// ============================================================================
+
+test("chmod +x on a local script is allowed (was a false positive)", () => {
+  assert.equal(checkBashWords("chmod +x ./run.sh", CWD, "max"), undefined);
+  assert.equal(checkBashWords("chmod 755 ./bin/tool.sh", CWD, "max"), undefined);
+  assert.equal(checkBashWords("chmod -R u+w ./dist", CWD, "max"), undefined);
+});
+
+test("chmod still blocks world-writable, escalation and root-recursive", () => {
+  assert.match(checkBashWords("chmod 777 ./x", CWD, "max")!, /world-writable/i);
+  assert.match(checkBashWords("chmod o+w ./x", CWD, "max")!, /world-writable/i);
+  assert.match(checkBashWords("sudo chmod 644 ./x", CWD, "max")!, /privilege escalation/i);
+  assert.match(checkBashWords("chmod -R 755 /", CWD, "max")!, /recursively/i);
+});
+
+test("chown: ordinary change allowed, root-recursive and escalation blocked", () => {
+  assert.equal(checkBashWords("chown deploy:deploy ./file", CWD, "max"), undefined);
+  assert.match(checkBashWords("chown -R deploy /etc", CWD, "max")!, /recursively|protected/i);
+  assert.match(checkBashWords("sudo chown root ./x", CWD, "max")!, /privilege escalation/i);
 });
 
 test("checkBashWords blocks dd over sensitive path", () => {
